@@ -1,0 +1,60 @@
+{
+  "name": "dsh-human-browser",
+  "version": "0.1.2",
+  "description": "DSH plugin: drive the Chrome you are already using — native messaging + chrome.debugger, real Input.* events, no CDP domains enabled, human-shaped pointer and typing. Windows only; the MV3 extension ships as a GitHub Release and is installed automatically.",
+  "type": "module",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client",
+    "lib",
+    "host",
+    "scripts/install.mjs",
+    "cordis.patch.yml",
+    "extension-version.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "browser",
+    "chrome",
+    "chrome-extension",
+    "cdp",
+    "native-messaging",
+    "browser-automation",
+    "stealth"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2685387167/dsh-human-browser.git"
+  },
+  "homepage": "https://github.com/2685387167/dsh-human-browser#readme",
+  "bugs": {
+    "url": "https://github.com/2685387167/dsh-human-browser/issues"
+  },
+  "author": "2685387167",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "win32"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  }
+}

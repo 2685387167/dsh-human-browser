@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>dsh-human-browser</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 14px 16px;
+      width: 268px;
+      background: #17161b; color: #ece8f2;
+      font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    h1 { margin: 0 0 2px; font-size: 13px; font-weight: 600; letter-spacing: .02em; }
+    .sub { color: #8c8899; font-size: 11px; margin-bottom: 12px; }
+    .row { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; }
+    .row .k { color: #a9a4b8; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
+    .on  { background: #4ade80; box-shadow: 0 0 8px #4ade8077; }
+    .off { background: #f87171; box-shadow: 0 0 8px #f8717177; }
+    button {
+      margin-top: 12px; width: 100%; padding: 7px 10px;
+      border: 1px solid #33303d; border-radius: 7px;
+      background: #221f2a; color: #ece8f2; font: inherit; cursor: pointer;
+    }
+    button:hover { background: #2a2634; }
+    .note { margin-top: 11px; padding-top: 10px; border-top: 1px solid #29262f; color: #7d7889; font-size: 11px; line-height: 1.55; }
+    code { color: #c9b6ff; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h1>dsh-human-browser</h1>
+  <div class="sub" id="origin">当前页面</div>
+
+  <div class="row"><span class="k">DSH 连接</span><span id="conn"><span class="dot off"></span>未连接</span></div>
+  <div class="row"><span class="k">已授权标签页</span><span id="tabs">0</span></div>
+  <div class="row"><span class="k">版本</span><span id="ver">—</span></div>
+
+  <button id="access" disabled>授权当前标签页</button>
+  <button id="scripts" disabled>允许本页执行脚本</button>
+  <button id="reconnect">重新连接</button>
+
+  <div class="note" id="hint">
+    授权后，DSH 可以读取和操作此页。
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
