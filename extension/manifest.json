@@ -1,9 +1,15 @@
 {
   "manifest_version": 3,
   "name": "dsh-human-browser",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Drive the Chrome you already use — real CDP Input events, no injected scripts, no enabled domains.",
   "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": [
     "debugger",
     "tabs",
@@ -16,7 +22,12 @@
   },
   "action": {
     "default_title": "dsh-human-browser",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4PAtEeCSXrpuMNZrYRitnubFNHiqMEc0/TEJpha04yOhHC/lOchrlo+RVt76tpuDqrWlnlk8t92dVCR+d8D8+sbRZYg/XkLpjPFFmoqk+axbVWGXoMN/BAabM4/ln7AaOOPmfDho4Sdy8kJayjmtKkxqwfEKqIXFEf4RFAmxVaIS3E2/jTw7CDQv/BXm3LODmfYKm61jBxxlsf339B8ho3OxwzF/QsYDsN0CfAd0gLmmwD0wLQLiQ4G+uIYdWHgcmkAe0kRdJnxWReewI9ftCXezpGmiH3jMpJn07ekvxAiGFXjsSD3yOy/9hDA7D5kHpauiBkZ3wGHzNlKq95jPJwIDAQAB"
 }

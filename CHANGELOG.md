@@ -3,15 +3,25 @@
 本项目遵循语义化版本。**版本号由维护者手动指定**：一次发版 = 一次提交 + 一个 GitHub Release；
 这里只记版本级的变化，日常修补不进日志。
 
-## 未发布
+## 0.1.3 — 2026-11-23
 
-> 等维护者指定版本号后，这一段会被折成正式条目。
+### 新增
 
-- **扩展更新改为「GitHub Releases 下载 + 弹窗提示」**：插件包不再包含扩展，扩展按版本发布成 zip 挂在 Releases 上，旧版本全部保留
-- 新增 `/human-browser/update/*` 四条路由：`status` / `install` / `progress` / `dismiss`，供 client 侧弹窗查询与触发
+- **扩展更新改为「GitHub Releases 下载 + 弹窗提示」**：插件包不再包含扩展；扩展按版本发布成 zip 挂在 Releases 上，旧版本全部保留，想用哪个自己下
+- 新增 `/human-browser/update/*` 四条路由（`status` / `install` / `progress` / `dismiss`），供 client 侧弹窗查询状态与触发安装
 - 新增 `lib/chrome-profile.js`：从 Chrome / Edge 的 **`Secure Preferences`** 读取扩展的真实加载路径与版本（注意不是 `Preferences`，那里是空的）
 - 新增 `lib/extension-updater.js`：下载 zip、解压、清单式覆盖安装（多余的旧文件会被删掉）、进度状态机
-- 扩展侧新增自检：磁盘 manifest 版本高于运行版本时自动 `chrome.runtime.reload()`，覆盖后无需用户手动刷新
+- 扩展侧新增自检：磁盘 manifest 版本**高于**运行版本时自动 `chrome.runtime.reload()`，覆盖后无需用户手动刷新
+- 扩展新增图标（16 / 32 / 48 / 128）
+
+### 变更
+
+- 插件包不再包含扩展目录；`install.mjs` 改为从 `extension-version.json` 读扩展 ID，不再依赖 `extension/manifest.json`
+- 生成新公钥时会同步把新的扩展 ID 写回 `extension-version.json`
+
+### 修复
+
+- 版本比较统一用「严格小于」语义：用户把版本号改高（自己动过）时既不提示也不覆盖
 
 ## 0.1.2 — 2026-11-20
 

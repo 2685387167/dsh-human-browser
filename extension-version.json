@@ -1,6 +1,6 @@
 {
   "extensionId": "chmijdopmnaaobpmpcibbegndonlgmic",
-  "extensionVersion": "0.1.2",
+  "extensionVersion": "0.1.3",
   "repository": "2685387167/dsh-human-browser",
-  "releaseNotes": "· 滚动后的截图按可见区域裁剪，元素截图补上布局视口偏移\n· 点击改为单次提交按下与抬起，越界坐标在移动前拒绝\n· 元素引用改为带快照版本的字符串，重做快照或导航后旧 ref 失效\n· 输入串行执行，超时会取消后续输入\n· 逐页授权 HTTP(S) 标签页，browser_eval 需单独开启\n· JSON Lines 改为流式 UTF-8 解码，中文跨块不再乱码"
+  "releaseNotes": "· 新增扩展自检：磁盘版本高于运行版本时自动重载，更新后无需手动刷新\n· 新增插件内更新提示：版本低于最新时弹窗，一键下载安装\n· 扩展新增图标（16 / 32 / 48 / 128）\n· 更新日志改到版本级维护，旧版本保留在 Releases 上"
 }
