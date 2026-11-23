@@ -62,15 +62,43 @@ export function idFromPublicKey(derBuffer) {
   return [...hex].map((c) => String.fromCharCode(97 + parseInt(c, 16))).join('')
 }
 
+/**
+ * 确定扩展 ID（必要时先生成公钥）。
+ *
+ * 两种安装形态：
+ *  ① 开发目录：有 `extension/manifest.json`，读/生成 key，由 key 算出 ID
+ *  ② 发布包：**不含 `extension/`**（扩展走 GitHub Releases），ID 来自 `extension-version.json`
+ *
+ * 生成新 key 后必须把新 ID 同步写回 `extension-version.json` —— 否则运行时的更新检测
+ * 会拿着旧 ID 去 Chrome 配置里找扩展，永远找不到，误判成"未安装"。
+ */
 function ensureKey() {
+  const metaFile = path.join(ROOT, 'extension-version.json')
+  let meta = {}
+  try {
+    meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'))
+  } catch {
+    /* 没有就按空处理 */
+  }
+
+  // 情形 ②：发布包里没有 manifest，只能信 extension-version.json
+  if (!fs.existsSync(MANIFEST)) {
+    if (meta.extensionId) {
+      return { manifest: null, der: null, created: false, extId: meta.extensionId }
+    }
+    throw new Error(`既找不到 ${MANIFEST}，extension-version.json 里也没有 extensionId`)
+  }
+
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'))
   if (manifest.key) {
-    return { manifest, der: Buffer.from(manifest.key, 'base64'), created: false }
+    const der = Buffer.from(manifest.key, 'base64')
+    return { manifest, der, created: false, extId: idFromPublicKey(der) }
   }
   if (CHECK_ONLY) {
     warn('扩展 manifest 里还没有 key（ID 会随目录路径变化）')
-    return { manifest, der: null, created: false }
+    return { manifest, der: null, created: false, extId: meta.extensionId || null }
   }
+
   const { publicKey } = crypto.generateKeyPairSync('rsa', {
     modulusLength: 2048,
     publicKeyEncoding: { type: 'spki', format: 'der' },
@@ -78,7 +106,14 @@ function ensureKey() {
   })
   manifest.key = Buffer.from(publicKey).toString('base64')
   fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
-  return { manifest, der: publicKey, created: true }
+
+  const extId = idFromPublicKey(publicKey)
+  // 公钥换了 = ID 换了，必须让运行时知道新的那个
+  if (fs.existsSync(metaFile)) {
+    meta.extensionId = extId
+    fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8')
+  }
+  return { manifest, der: publicKey, created: true, extId }
 }
 
 // ── 2. node 可执行文件 ──────────────────────────────────────────────────────
@@ -138,9 +173,8 @@ const BROWSERS = [
 
 say('\n\x1b[1mdsh-human-browser · 安装\x1b[0m\n')
 
-const { manifest, der, created } = ensureKey()
-if (der) {
-  const extId = idFromPublicKey(der)
+const { der, created, extId } = ensureKey()
+if (extId) {
   ok(`扩展 ID：${extId}${created ? '（刚生成公钥）' : ''}`)
 
   if (CHECK_ONLY) {
@@ -195,11 +229,17 @@ if (der) {
     }
   }
 
-  say('\n\x1b[1m在 Chrome 和 DSH 中启用更新\x1b[0m')
+  say('\n\x1b[1m启用扩展\x1b[0m')
   say(`  1. 打开 chrome://extensions`)
-  say(`  2. 已安装时，点 dsh-human-browser 卡片的重新加载按钮。`)
-  say(`  3. 首次安装时，打开「开发者模式」，点「加载已解压的扩展程序」，选择下方目录。`)
-  say(`     \x1b[36m${EXT_DIR}\x1b[0m`)
+  say(`  2. 已装过：点 dsh-human-browser 卡片的重新加载按钮。`)
+  if (fs.existsSync(EXT_DIR)) {
+    // 开发目录：扩展就在手边，直接指过去
+    say(`  3. 首次安装：打开「开发者模式」，点「加载已解压的扩展程序」，选择下方目录。`)
+    say(`     \x1b[36m${EXT_DIR}\x1b[0m`)
+  } else {
+    // 发布包：扩展不在包里，走插件弹窗下载
+    say(`  3. 首次安装：在 DSH 里看插件弹窗，点「下载并安装」，它会自动下载解压并给出目录。`)
+  }
   say(`  4. 重载 DSH bundle，在扩展弹窗查看连接状态并授权测试标签页。`)
   say('')
 } else {
