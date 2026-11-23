@@ -12,7 +12,7 @@
 
 一个 DeepSeek Harness 插件，加上一个配套的 Chrome MV3 扩展。扩展用 `chrome.debugger` 派发**真实的 CDP 输入事件**，插件把"像人"这件事算好之后下发给它。
 
-装好之后，模型可以直接调 14 个 `browser_*` 工具操作你的浏览器：快照、点击、输入、滚动、等待、截图、跑脚本、反检测自检。
+装好之后，模型可以直接调 15 个 `browser_*` 工具操作你的浏览器：快照、点击、输入、滚动、等待、截图、跑脚本、反检测自检和卸载清理。
 
 ---
 
@@ -53,7 +53,7 @@ WebGL               : ANGLE (Intel, Intel(R) UHD Graphics 770, Direct3D11)
 
 | 工具 | 干什么 |
 |---|---|
-| `browser_status` | 连接状态、已授权标签页、扩展版本 |
+| `browser_status` | 连接状态、已授权标签页、扩展版本及协议版本 |
 | `browser_tabs` | 列 / 开 / 关 / 切标签页 |
 | `browser_snapshot` | 读可交互元素清单，每个带完整 ref 和人类可读标签 |
 | `browser_read` | 读正文 / HTML / 元素属性 / 页面元信息 |
@@ -67,8 +67,9 @@ WebGL               : ANGLE (Intel, Intel(R) UHD Graphics 770, Direct3D11)
 | `browser_eval` | 页面 JS（需单独授权） |
 | `browser_stealth` | 反检测自检，报四层信号实测值 |
 | `browser_detach` | 释放接管并撤销授权 |
+| `browser_cleanup` | 显式清理 native host，返回实际处理结果 |
 
-14 个工具的 schema 合计约 7200 字节（≈1800 tokens），是每次请求都要付的固定成本。
+15 个工具的 schema 合计约 7500 字节（≈1900 tokens），是每次请求都要付的固定成本。
 
 ---
 
@@ -81,6 +82,8 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 ```
 
 装好后重启 DSH。插件会在加载时自动注册 native messaging host（写 HKCU 注册表，不需要管理员）。
+
+从旧版升级时，运行 `node scripts/install.mjs` 更新本机 native host，再重载 Chrome 扩展，让宿主可以转发扩展的协议版本。
 
 ### 2. Chrome 扩展
 
@@ -96,6 +99,11 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 装好扩展后，**每个要操作的页面都要在扩展弹窗点一次「授权当前标签页」**。需要 `browser_eval` 时再点「允许本页执行脚本」。
 
 跨来源导航后授权失效，需要重新授权。
+
+### 清理宿主
+
+- `browser_cleanup({ scope: 'host' })` 删除 Chrome、Edge、Chromium 的 native messaging 注册表项、宿主启动器、注册清单及运行时。
+- `browser_cleanup({ scope: 'all' })` 还清理默认临时会话目录与更新缓存。扩展目录和静默状态会保留。运行后可重新启用插件以恢复会话。
 
 ---
 

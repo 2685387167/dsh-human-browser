@@ -30,6 +30,8 @@ import { snapshotExpression } from './snapshot.js'
 const HOST_NAME = 'com.dsh.humanbrowser'
 const CDP_VERSION = '1.3'
 const VERSION = chrome.runtime.getManifest().version
+/** 通信格式不兼容时才递增，与扩展发布版本独立。 */
+const PROTOCOL = 1
 const SNAP_TTL = 5 * 60 * 1000
 const MAX_NODES = 260
 
@@ -86,6 +88,8 @@ function connectHost() {
   try {
     nativePort = chrome.runtime.connectNative(HOST_NAME)
     port = nativePort
+    // 扩展只上报自己的身份，宿主转发时补充会话 token 和进程号。
+    nativePort.postMessage({ type: 'hello', version: VERSION, protocol: PROTOCOL })
   } catch (e) {
     lastError = String(e?.message || e)
     port = null
@@ -628,6 +632,7 @@ const METHODS = {
     const tabs = await chrome.tabs.query({})
     return {
       version: VERSION,
+      protocol: PROTOCOL,
       attached: [...attached],
       authorized: [...grants.keys()],
       tabCount: tabs.length,

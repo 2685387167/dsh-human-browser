@@ -21,6 +21,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { HOST_NAME, HOST_DIR, HOST_REGISTRATIONS } from '../lib/protocol.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -28,8 +29,6 @@ const EXT_DIR = path.join(ROOT, 'extension')
 const MANIFEST = path.join(EXT_DIR, 'manifest.json')
 const HOST_MJS = path.join(ROOT, 'host', 'host.mjs')
 
-const HOST_NAME = 'com.dsh.humanbrowser'
-const HOST_DIR = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'dsh-human-browser')
 const HOST_CMD = path.join(HOST_DIR, `${HOST_NAME}.cmd`)
 const NM_FILE = path.join(HOST_DIR, `${HOST_NAME}.json`)
 
@@ -163,12 +162,6 @@ function regQuery(key) {
   }
 }
 
-const BROWSERS = [
-  ['Chrome', `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${HOST_NAME}`],
-  ['Edge', `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${HOST_NAME}`],
-  ['Chromium', `HKCU\\Software\\Chromium\\NativeMessagingHosts\\${HOST_NAME}`],
-]
-
 // ── 主流程 ─────────────────────────────────────────────────────────────────
 
 say('\n\x1b[1mdsh-human-browser · 安装\x1b[0m\n')
@@ -178,7 +171,7 @@ if (extId) {
   ok(`扩展 ID：${extId}${created ? '（刚生成公钥）' : ''}`)
 
   if (CHECK_ONLY) {
-    const cur = regQuery(BROWSERS[0][1])
+    const cur = regQuery(HOST_REGISTRATIONS[0][1])
     if (cur === NM_FILE) ok(`注册表已指向 ${NM_FILE}`)
     else warn(`注册表未就绪（当前：${cur || '不存在'}）`)
     say('\n（--check 模式，未做任何改动）\n')
@@ -220,7 +213,7 @@ if (extId) {
   ok(`native manifest：${NM_FILE}`)
 
   // 注册表
-  for (const [label, key] of BROWSERS) {
+  for (const [label, key] of HOST_REGISTRATIONS) {
     try {
       regSet(key, NM_FILE)
       ok(`注册 ${label}`)

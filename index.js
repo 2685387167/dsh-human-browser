@@ -12,6 +12,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { Bridge } from './lib/bridge.js'
@@ -19,8 +20,12 @@ import {
   movePlan, pickPoint, typePlan, scrollPlan,
   thinkPause, stepPause, resolveProfile, makeRng, entropySeed,
 } from './lib/human.js'
-import { PIPE_PATH, newToken, writeSession, ensureDataDir, clearSession, log } from './lib/protocol.js'
+import {
+  PIPE_PATH, newToken, writeSession, ensureDataDir, clearSession, log, PLUGIN_PROTOCOL,
+  HOST_NAME, HOST_DIR, HOST_REGISTRATIONS, DATA_DIR, DEFAULT_DATA_DIR, LOG_FILE,
+} from './lib/protocol.js'
 import { ExtensionUpdater } from './lib/extension-updater.js'
+import { findExtensionInstallations } from './lib/chrome-profile.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -63,6 +68,8 @@ const textOutput = {
 let lifecycle = null
 /** Cordis 的 ctx：截图要借它的附件库把图交给模型看 */
 let pluginCtx = null
+/** 防止同一插件进程同时执行清理与安装。 */
+let cleanupInProgress = false
 
 /** 截图结果 → 附件引用，render 是同步的所以要先存这儿 */
 const shotRefs = new Map()
@@ -72,6 +79,7 @@ const shotRefs = new Map()
 async function boot() {
   const owner = lifecycle
   if (!owner) throw new Error('浏览器插件尚未启用')
+  if (owner.suspended) throw new Error('已清理会话，重新启用插件后可重连')
   if (owner.bridge) return owner.bridge
   if (owner.booting) return owner.booting
   owner.booting = (async () => {
@@ -80,7 +88,7 @@ async function boot() {
     const b = new Bridge({ pipe: PIPE_PATH, token })
     try {
       await b.start()
-      if (lifecycle !== owner) throw new Error('浏览器插件已卸载')
+      if (lifecycle !== owner || owner.suspended) throw new Error('浏览器会话已停止')
       // 端点启动成功后才发布本实例的会话文件。
       writeSession({ mode: b.mode, pipe: PIPE_PATH, port: b.tcpPort, token })
       owner.bridge = b
@@ -95,6 +103,107 @@ async function boot() {
     return await owner.booting
   } finally {
     owner.booting = null
+  }
+}
+
+/** 逐项核对和删除本插件的注册表叶子，区分缺失与无权限等失败。 */
+function cleanupHostRegistry() {
+  const keys = HOST_REGISTRATIONS.map(([, key]) => key)
+  const payload = Buffer.from(JSON.stringify(keys)).toString('base64')
+  const script = [
+    '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
+    `$keys = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')))`,
+    '$results = foreach ($key in $keys) {',
+    '  $target = "Registry::HKEY_CURRENT_USER\\" + $key.Substring(5)',
+    '  try {',
+    '    if (!(Test-Path -LiteralPath $target -ErrorAction Stop)) { @{ path = $key; state = "absent" }; continue }',
+    '    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop',
+    '    @{ path = $key; state = "removed" }',
+    '  } catch { @{ path = $key; state = "failed"; error = $_.Exception.Message } }',
+    '}',
+    'ConvertTo-Json -Compress -InputObject @($results)',
+  ].join('\n')
+  try {
+    const json = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, encoding: 'utf8', timeout: 15000 })
+    return JSON.parse(json)
+  } catch (error) {
+    return keys.map((key) => ({ path: key, state: 'failed', error: error.message }))
+  }
+}
+
+/** 比较实际路径，避免递归删除时命中另一个 Chrome 配置正在用的目录。 */
+function locationForCleanup(value) {
+  try { return fs.realpathSync.native(value) } catch { return path.resolve(value) }
+}
+
+/** 只处理固定根目录的直属目标，拒绝移动过的路径和链接。 */
+function removeCleanupTarget(root, name, protectedPaths) {
+  const target = path.resolve(root, name)
+  try {
+    if (path.dirname(target) !== root || path.relative(root, locationForCleanup(root))) {
+      throw new Error('清理路径不在预期目录内')
+    }
+    const stat = fs.lstatSync(target)
+    if (stat.isSymbolicLink()) return { path: target, state: 'preserved', error: '目标是链接' }
+    const protectedTarget = protectedPaths.some((protectedPath) => {
+      const relative = path.relative(target, protectedPath)
+      return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative))
+    })
+    if (protectedTarget) return { path: target, state: 'preserved', error: '包含扩展目录、静默状态或 Chrome 安装点' }
+    fs.rmSync(target, { recursive: stat.isDirectory() })
+    return { path: target, state: 'removed' }
+  } catch (error) {
+    if (error.code === 'ENOENT') return { path: target, state: 'absent' }
+    return { path: target, state: 'failed', error: error.message }
+  }
+}
+
+/** 用户显式清理全部时先停止这一进程的临时会话，避免马上把数据重新写回。 */
+async function stopSessionForCleanup(owner) {
+  if (!owner || path.relative(DEFAULT_DATA_DIR, path.resolve(DATA_DIR))) return
+  owner.suspended = true
+  clearInterval(owner.retry)
+  await owner.booting?.catch(() => {})
+  const bridge = owner.bridge
+  if (!bridge) return
+  owner.bridge = null
+  clearSession(bridge.token)
+  shotRefs.clear()
+  await bridge.stop()
+}
+
+/** 按 scope 清理已知产物；扩展目录与静默状态始终保留。 */
+async function cleanupBrowser(scope) {
+  if (!['host', 'all'].includes(scope)) throw new Error('scope 必须是 host 或 all')
+  if (process.platform !== 'win32') throw new Error('清理工具仅支持 Windows')
+  if (cleanupInProgress) throw new Error('正在清理，请等待当前操作完成')
+  const owner = lifecycle
+  if (scope === 'all' && ['downloading', 'installing'].includes(owner?.updater?.getProgress()?.stage)) {
+    throw new Error('扩展正在更新，请在更新结束后清理')
+  }
+  cleanupInProgress = true
+  try {
+    const { extensionId } = readExtensionMeta()
+    const installations = extensionId ? findExtensionInstallations(extensionId) : []
+    const protectedPaths = [path.join(HOST_DIR, 'extension'), path.join(HOST_DIR, 'state.json'),
+      ...installations.map((item) => item.path).filter(Boolean)].map(locationForCleanup)
+    const results = cleanupHostRegistry()
+    if (scope === 'all') await stopSessionForCleanup(owner)
+    for (const name of ['runtime', `${HOST_NAME}.cmd`, `${HOST_NAME}.json`]) {
+      results.push(removeCleanupTarget(HOST_DIR, name, protectedPaths))
+    }
+    if (scope === 'all') {
+      results.push(removeCleanupTarget(HOST_DIR, 'update-work', protectedPaths))
+      results.push(removeCleanupTarget(path.dirname(DEFAULT_DATA_DIR), path.basename(DEFAULT_DATA_DIR), protectedPaths))
+    }
+    const labels = { removed: '已删除', absent: '原本不存在', failed: '删除失败', preserved: '已保留' }
+    return { text: [
+      ...results.map((item) => `${labels[item.state]} ${item.path}${item.error ? `（${item.error}）` : ''}`),
+      `已保留 ${path.join(HOST_DIR, 'extension')} 与 state.json；扩展目录需要单独确认后再处理。`,
+    ].join('\n') }
+  } finally {
+    cleanupInProgress = false
   }
 }
 
@@ -199,11 +308,18 @@ export const TOOLS = [
       try {
         b = await boot()
       } catch (e) {
+        if (lifecycle?.suspended) return { text: e.message }
         log(`status: boot 失败 ${e?.message}`)
       }
       const lines = []
       lines.push(`插件：${b ? '已就绪' : '未就绪'}`)
       lines.push(`浏览器：${b?.connected ? '已连接' : '未连接'}${b?.lastError ? `（${b.lastError}）` : ''}`)
+      const info = b?.hostInfo
+      lines.push(`协议版本：扩展 ${info?.protocol ?? '未知'}，插件 ${PLUGIN_PROTOCOL}`)
+      if (info?.protocolError) {
+        lines.push(`扩展版本：${info.version ?? '未知'}`)
+        return { text: lines.join('\n') }
+      }
       if (b?.connected) {
         const s = await b.request('status', {}, 8000)
         lines.push(`扩展版本：${s.version}`)
@@ -221,9 +337,21 @@ export const TOOLS = [
         lines.push('  1. Chrome 是否在运行')
         lines.push('  2. chrome://extensions 里 dsh-human-browser 是否启用')
         lines.push('  3. 点扩展图标，看是否显示「已连接」；没有就点「重新连接」')
-        lines.push(`  4. 日志：${path.join(os.tmpdir(), 'dsh-human-browser', 'plugin.log')}`)
+        lines.push(`  4. 日志：${LOG_FILE}`)
       }
       return { text: lines.join('\n') }
+    },
+  }),
+
+  defineTool({
+    name: 'browser_cleanup',
+    description: '按用户明确要求清理浏览器原生宿主，返回逐项结果。保留已加载扩展。',
+    parameters: {
+      scope: { type: 'string', required: true, enum: ['host', 'all'], description: 'host 清理注册表与宿主运行时，all 另清理临时数据' },
+    },
+    output: textOutput,
+    async execute({ scope }) {
+      return cleanupBrowser(scope)
     },
   }),
 
@@ -727,7 +855,7 @@ export const inject = ['tools']
 
 export function apply(ctx) {
   lifecycle?.dispose()
-  const owner = { bridge: null, booting: null, retry: null, dispose: null }
+  const owner = { bridge: null, booting: null, retry: null, dispose: null, suspended: false, updater: null }
   lifecycle = owner
   pluginCtx = ctx
   log('浏览器插件开始加载')
@@ -768,6 +896,7 @@ export function apply(ctx) {
         extensionVersionFile: path.join(__dirname, 'extension-version.json'),
         log,
       })
+      owner.updater = updater
       if (typeof ctx.inject === 'function') {
         ctx.inject(['webServer'], (sub) => {
           if (!sub || typeof sub.effect !== 'function' || !sub.webServer) return
@@ -793,11 +922,11 @@ export function apply(ctx) {
 
   // 启动失败时限次重试，插件卸载会同步停止后续重试。
   void boot().catch((error) => {
+    if (lifecycle !== owner || owner.suspended) return
     log(`启动失败：${error.message}`)
-    if (lifecycle !== owner) return
     let attempts = 0
     owner.retry = setInterval(() => {
-      if (lifecycle !== owner || owner.bridge || attempts++ >= 12) {
+      if (lifecycle !== owner || owner.suspended || owner.bridge || attempts++ >= 12) {
         clearInterval(owner.retry)
         return
       }
@@ -861,7 +990,10 @@ async function handleUpdateRoute(updater, req, res) {
   try {
     if (req.method === 'GET' && route === 'status') return send(200, updater.getStatus())
     if (req.method === 'GET' && route === 'progress') return send(200, updater.getProgress())
-    if (req.method === 'POST' && route === 'install') return send(200, updater.startInstall())
+    if (req.method === 'POST' && route === 'install') {
+      if (cleanupInProgress) return send(409, { error: '正在清理浏览器宿主，请稍后重试' })
+      return send(200, updater.startInstall())
+    }
     if (req.method === 'POST' && route === 'dismiss') {
       const body = await readJsonBody(req)
       const version = body?.version || url.searchParams.get('version') || null

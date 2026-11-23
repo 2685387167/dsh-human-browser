@@ -57,10 +57,27 @@ function vlog(s) {
 
 let cdpSock = null
 let connected = false
+/** 缓存当前 native port 的扩展身份，插件重启后可继续用来握手。 */
+let extensionHello = null
+let firstHelloTimer
+let connectingSocket
 
 const stdioDecoder = new FrameDecoder((msg) => {
-  // 扩展 → 插件：原样转发
   vlog(`← 扩展 ${msg?.id ?? msg?.type}`)
+  if (msg?.type === 'hello') {
+    if (extensionHello) return
+    extensionHello = { version: msg.version, protocol: msg.protocol }
+    if (firstHelloTimer) {
+      clearTimeout(firstHelloTimer)
+      firstHelloTimer = null
+      connectPlugin()
+    } else {
+      // 首包迟到时重新认证，替换先前以旧版身份建立的会话。
+      connectingSocket?.destroy()
+    }
+    return
+  }
+  // 扩展 → 插件：业务消息原样转发。
   if (!connected) {
     // 插件不在时**不能回包**。早先这里回了一条 {id, ok:false, error}，
     // 而扩展的 onMessage 分不清「请求」和「响应」，会把它当新请求再发回来 —— 直接打成死循环。
@@ -122,6 +139,7 @@ function attempt(session, tcpOnly) {
   const label = usePipe ? session.pipe : `127.0.0.1:${session.port}`
   flog(`尝试连接 ${label}`)
   const sock = usePipe ? net.connect(session.pipe) : net.connect(session.port, '127.0.0.1')
+  connectingSocket = sock
   let ready = false
   let reason = 'DSH 连接断开'
   // 每条连接有独立的解码器与握手期限，避免重连沿用旧连接里的半条消息。
@@ -144,7 +162,8 @@ function attempt(session, tcpOnly) {
       retry = 0
       stderr(`已接到插件 ${label}`)
       flog(`已连上插件 ${label}`)
-      writeStdout({ type: 'host-connected' })
+      // 协议不匹配也保留传输连接，让 DSH 和扩展弹窗都能显示具体原因。
+      writeStdout(msg.error ? { type: 'host-disconnected', reason: msg.error } : { type: 'host-connected' })
       return
     }
     vlog(`收到插件消息 id=${msg?.id} method=${msg?.method || msg?.type}`)
@@ -152,7 +171,7 @@ function attempt(session, tcpOnly) {
   })
 
   sock.on('connect', () => {
-    sock.write(encodeLine({ type: 'hello', token: session.token, pid: process.pid, version: '0.1.2' }))
+    sock.write(encodeLine({ type: 'hello', token: session.token, pid: process.pid, ...extensionHello }))
   })
 
   sock.on('data', (chunk) => {
@@ -168,6 +187,7 @@ function attempt(session, tcpOnly) {
 
   sock.on('close', () => {
     clearTimeout(handshake)
+    if (connectingSocket === sock) connectingSocket = null
     flog(`连接 ${label} 关闭: ${reason}`)
     if (cdpSock === sock) {
       connected = false
@@ -218,4 +238,8 @@ process.on('uncaughtException', (e) => {
 
 flog(`host 启动 node=${process.version} tmp=${os.tmpdir()} session=${SESSION_FILE}`)
 stderr(`host 启动 pid=${process.pid}`)
-connectPlugin()
+// 新扩展会立即发送 hello；给旧扩展保留有界等待，再按第一版协议连接。
+firstHelloTimer = setTimeout(() => {
+  firstHelloTimer = null
+  connectPlugin()
+}, 1000)
