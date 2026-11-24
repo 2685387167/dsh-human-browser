@@ -1,6 +1,10 @@
 {
   "extensionId": "chmijdopmnaaobpmpcibbegndonlgmic",
   "extensionVersion": "0.1.3",
+  "extensionTag": "v0.1.3",
+  "protocol": 1,
+  "sha256": "39e8775e4efa97f8f154b928b305c60136843aaf91cddad9181dd9492c21d552",
+  "trackRecommendation": true,
   "repository": "2685387167/dsh-human-browser",
   "releaseNotes": "· 新增扩展自检：磁盘版本高于运行版本时自动重载，更新后无需手动刷新\n· 新增插件内更新提示：版本低于最新时弹窗，一键下载安装\n· 扩展新增图标（16 / 32 / 48 / 128）\n· 更新日志改到版本级维护，旧版本保留在 Releases 上"
 }

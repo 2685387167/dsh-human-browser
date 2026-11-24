@@ -83,6 +83,8 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 
 装好后重启 DSH。插件会在加载时自动注册 native messaging host（写 HKCU 注册表，不需要管理员）。
 
+如需固定安装这次内测修订，安装地址使用 `github:2685387167/dsh-human-browser#plugin-v0.1.3`。历史 `v0.1.3` 标签保留给原扩展发布，附带的 Source code 对应当时的提交。
+
 从旧版升级后，重启 DSH 会同步更新本机 native host。若 `browser_status` 显示宿主注册失败，可以在插件目录运行 `node scripts/install.mjs --check` 检查注册，或运行 `node scripts/install.mjs` 手动修复。
 
 ### 2. Chrome 扩展
@@ -90,9 +92,11 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 插件启动后会检测你 Chrome 里的扩展版本：
 
 - **没装过** → 弹窗提示「下载并安装」，点一下自动下载解压，再到 `chrome://extensions` 打开「开发者模式」，选择「加载已解压的扩展程序」并选中提示的目录
-- **装过但版本低** → 弹窗提示「更新」，自动覆盖到 Chrome 记录的那个目录。保持开发者模式开启，扩展会在下一次版本自检时重载，通常在五分钟内
+- **装过但低于推荐版** → 弹窗提示「更新」，逐个更新可验证的旧版解压目录。保持开发者模式开启，扩展会在下一次版本自检时重载，通常在五分钟内
 
 扩展的每个版本都发布在 [Releases](https://github.com/2685387167/dsh-human-browser/releases) 上，旧版本保留。想用特定版本可以自己下载解压再用 `chrome://extensions` 加载。
+
+DSH 插件版本和 Chrome 扩展版本独立维护。插件读取线上 [扩展推荐](extension-version.json)，只接受与当前通信协议兼容的推荐；离线时使用本地已有的推荐。GitHub 的 Latest 标记只用于浏览发布页面。
 
 ### 3. 授权
 
@@ -137,17 +141,11 @@ MV3 扩展（chrome.debugger，零域 enable）
 ## 开发
 
 ```powershell
-# 全部测试（42 项）
-node --test tests/*.test.mjs
-
-# 链路自检（不碰浏览器）
-node scripts/selftest.mjs
-
-# 重装 native host（改完 host/*.mjs 必须跑一次）
-node scripts/install.mjs
+# 检查当前用户的 native host 注册
+node scripts/install.mjs --check
 ```
 
-`tests/` 与 `_ref/` 只在本地开发时有用，不进发布包。
+维护者的完整开发工作区另含测试和链路自检。GitHub 镜像保留插件、扩展源码和宿主安装器。
 
 ---
 

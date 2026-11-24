@@ -308,7 +308,7 @@ window.__ModuleLoader__.load({
           if (installRun) return
           installRun = new AbortController()
           const { signal } = installRun
-          const label = node('p', status.pendingReloadOnly ? '正在重载扩展…' : '正在启动安装…')
+          const label = node('p', '正在启动安装…')
           const bar = node('progress')
           bar.max = 100
           bar.setAttribute('aria-label', '扩展安装进度')
@@ -330,7 +330,7 @@ window.__ModuleLoader__.load({
                 label.textContent = `正在下载… ${percent}%`
                 bar.value = percent
               } else {
-                label.textContent = status.pendingReloadOnly ? '正在重载扩展…' : '正在安装…'
+                label.textContent = '正在安装…'
                 bar.removeAttribute('value')
               }
             })
@@ -348,7 +348,7 @@ window.__ModuleLoader__.load({
               throw new Error('宿主缺少扩展版本状态')
             }
             if (Date.now() < Date.parse(current.dismissedUntil)) return
-            if (current.installed && !current.needsUpdate) return
+            if (current.installed && !current.needsUpdate && !current.pendingReloadOnly) return
             status = current
             if (!status.installed) {
               view.show('需要一个浏览器扩展', [
@@ -358,14 +358,19 @@ window.__ModuleLoader__.load({
               return
             }
 
-            const title = status.pendingReloadOnly
-              ? '扩展文件已更新，需要重载'
-              : `扩展有新版本 ${status.targetVersion}`
-            const children = [node('p', `当前：${status.userVersion ?? '未知'} → 最新：${status.targetVersion}`, 'hb-secondary')]
+            if (status.pendingReloadOnly) {
+              view.show('等待浏览器自动重载扩展', [
+                node('p', '扩展文件已更新。请保持浏览器和扩展开发者模式开启，扩展会在下次自检时重载。'),
+              ], null, dismiss)
+              return
+            }
+
+            const title = `推荐扩展版本 ${status.targetVersion}`
+            const children = [node('p', `当前：${status.userVersion ?? '未知'} → 推荐：${status.targetVersion}`, 'hb-secondary')]
             const profiles = status.profiles ?? []
             const outdated = profiles.filter((profile) => isOlder(profile.version, status.targetVersion)).length
             if (profiles.length > 1 && outdated > 0) {
-              children.push(node('p', `有 ${outdated} 个配置的扩展低于最新版本。`, 'hb-secondary'))
+              children.push(node('p', `有 ${outdated} 个配置的扩展低于推荐版本。`, 'hb-secondary'))
             }
             if (status.releaseNotes) {
               const notes = node('section')

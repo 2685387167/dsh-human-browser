@@ -923,15 +923,17 @@ export function apply(ctx) {
       })
       owner.updater = updater
       if (typeof ctx.inject === 'function') {
-        ctx.inject(['webServer'], (sub) => {
-          if (!sub || typeof sub.effect !== 'function' || !sub.webServer) return
+        ctx.inject(['webServer', 'connection'], (sub) => {
+          // 使用 DSH /api 同一套登录和来源校验。老运行时没有该方法时不挂路由。
+          if (!sub || typeof sub.effect !== 'function' || !sub.webServer ||
+              typeof sub.connection?.requestRejection !== 'function') return
           sub.effect(
             () =>
               sub.webServer.register({
                 kind: 'prefix',
                 // 前缀不带尾斜杠 —— 这是 cyrene-theme 验证过的写法，带斜杠会匹配不上
                 path: '/human-browser/update',
-                handler: (req, res) => handleUpdateRoute(updater, req, res),
+                handler: (req, res) => handleUpdateRoute(updater, sub.connection, req, res),
               }),
             'human-browser: extension update routes',
           )
@@ -972,24 +974,30 @@ function readExtensionMeta() {
   }
 }
 
-/** 读一个 JSON 请求体（限制 1MB，坏 JSON 当空对象处理） */
+/** 读取小型 JSON 请求，断线、超限和无效 JSON 都能结束处理。 */
 function readJsonBody(req) {
   return new Promise((resolve) => {
-    let raw = ''
-    req.on('data', (chunk) => {
-      raw += chunk
-      if (raw.length > 1 << 20) {
-        try { req.destroy() } catch {}
+    const chunks = []
+    let length = 0
+    const onData = (chunk) => {
+      length += chunk.length
+      if (length <= 4096) chunks.push(chunk)
+      else {
+        req.off('data', onData)
+        resolve({ error: 413 })
       }
-    })
-    req.on('end', () => {
+    }
+    req.on('data', onData)
+    req.once('end', () => {
       try {
-        resolve(JSON.parse(raw || '{}'))
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+        resolve(body && typeof body === 'object' && !Array.isArray(body) ? { body } : { error: 400 })
       } catch {
-        resolve({})
+        resolve({ error: 400 })
       }
     })
-    req.on('error', () => resolve({}))
+    req.once('error', () => resolve({ error: 400 }))
+    req.once('close', () => resolve({ error: 400 }))
   })
 }
 
@@ -997,7 +1005,7 @@ function readJsonBody(req) {
  * 更新相关的四条路由。契约见 docs/update-api.md，前端（月月写的弹窗）按那份调用。
  * 返回的永远是 JSON，错误也带具体原因，不让前端去猜。
  */
-async function handleUpdateRoute(updater, req, res) {
+async function handleUpdateRoute(updater, connection, req, res) {
   const url = new URL(req.url ?? '/', 'http://localhost')
   const route = url.pathname.replace(/^\/human-browser\/update\/?/, '').replace(/\/+$/, '')
 
@@ -1013,15 +1021,28 @@ async function handleUpdateRoute(updater, req, res) {
   }
 
   try {
-    if (req.method === 'GET' && route === 'status') return send(200, updater.getStatus())
+    const rejection = connection.requestRejection(req)
+    if (rejection !== undefined) {
+      return send(rejection, { error: rejection === 401 ? '请先登录 DSH，再检查扩展更新' : 'DSH 拒绝了请求来源' })
+    }
+    if (req.method === 'GET' && route === 'status') {
+      await updater.refreshReleaseInfo()
+      return send(200, updater.getStatus())
+    }
     if (req.method === 'GET' && route === 'progress') return send(200, updater.getProgress())
+    if (req.method === 'POST' && (route === 'install' || route === 'dismiss') &&
+        !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) {
+      return send(415, { error: '更新操作需要 application/json 请求' })
+    }
     if (req.method === 'POST' && route === 'install') {
       if (cleanupInProgress) return send(409, { error: '正在清理浏览器宿主，请稍后重试' })
       return send(200, updater.startInstall())
     }
     if (req.method === 'POST' && route === 'dismiss') {
-      const body = await readJsonBody(req)
-      const version = body?.version || url.searchParams.get('version') || null
+      const { body, error } = await readJsonBody(req)
+      if (error) return send(error, { error: error === 413 ? '请求体太大' : '请求体必须是有效 JSON 对象' })
+      const version = body.version || url.searchParams.get('version') || null
+      if (version !== null && typeof version !== 'string') return send(400, { error: 'version 必须是字符串' })
       return send(200, updater.dismiss(version))
     }
     return send(404, { error: `没有这个路由：${req.method} ${route || '/'}` })

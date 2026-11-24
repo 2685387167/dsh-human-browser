@@ -21,7 +21,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { HOST_NAME, HOST_DIR, HOST_REGISTRATIONS } from '../lib/protocol.js'
+import { HOST_NAME, HOST_DIR, HOST_REGISTRATIONS, idFromPublicKey } from '../lib/protocol.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -32,14 +32,7 @@ const HOST_MJS = path.join(ROOT, 'host', 'host.mjs')
 const HOST_CMD = path.join(HOST_DIR, `${HOST_NAME}.cmd`)
 const NM_FILE = path.join(HOST_DIR, `${HOST_NAME}.json`)
 
-/**
- * host 运行时复制到这里。
- *
- * 为什么要复制：Chrome 启动 host 走的是 `cmd.exe`（.cmd 包装），而 cmd.exe 按**系统 ANSI**
- * 读脚本、按 ANSI 解析命令行。项目目录在 `E:\肥鱼专用\项目\...` —— 中文，一旦被写进 .cmd
- * 就是 UTF-8 字节被 GBK 解析的乱码，node 会报找不到文件。复制到 %LOCALAPPDATA% 这条纯
- * ASCII 路径上，整条链路就没有编码问题了。
- */
+/** 把宿主复制到每用户的固定目录，让启动器能通过自身目录定位脚本。 */
 const RUNTIME_DIR = path.join(HOST_DIR, 'runtime')
 const HOST_RUNTIME = path.join(RUNTIME_DIR, 'host', 'host.mjs')
 const LIB_RUNTIME = path.join(RUNTIME_DIR, 'lib', 'protocol.js')
@@ -50,12 +43,6 @@ const warn = (s) => say(`  \x1b[33m!\x1b[0m ${s}`)
 const bad = (s) => say(`  \x1b[31m✗\x1b[0m ${s}`)
 
 // ── 1. 扩展 ID ───────────────────────────────────────────────────────────────
-
-/** Chromium: id = sha256(publicKeyDer) 的前 16 字节，每个 hex nibble 映射到 a-p */
-export function idFromPublicKey(derBuffer) {
-  const hex = crypto.createHash('sha256').update(derBuffer).digest('hex').slice(0, 32)
-  return [...hex].map((c) => String.fromCharCode(97 + parseInt(c, 16))).join('')
-}
 
 /**
  * 确定扩展 ID（必要时先生成公钥）。
@@ -152,10 +139,12 @@ function regSet(key, value) {
 }
 function regQuery(key) {
   try {
-    const out = execFileSync('reg.exe', ['query', key, '/ve'],
-      { encoding: 'utf8', windowsHide: true, stdio: 'pipe', timeout: 5000 })
-    const m = out.match(/REG_SZ\s+(.+)$/m)
-    return m ? m[1].trim() : null
+    // reg.exe 的输出依赖系统代码页，用 .NET 读注册表并明确按 UTF-8 返回。
+    const subkey = key.replace(/^HKCU\\/, 'HKEY_CURRENT_USER\\')
+    const command = `[Console]::OutputEncoding = [Text.UTF8Encoding]::new(\$false); [Console]::WriteLine([Microsoft.Win32.Registry]::GetValue('${subkey}', '', ''))`
+    return execFileSync('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')],
+      { encoding: 'utf8', windowsHide: true, stdio: 'pipe', timeout: 5000 }).trim() || null
   } catch {
     return null
   }
@@ -179,6 +168,31 @@ function writeIfChanged(file, contents) {
   }
 }
 
+/** cmd 按本机代码页读批处理，非 ASCII 的 Node 路径改用启动器旁的运行时副本。 */
+function nodeForLauncher(node) {
+  if (/^[\x20-\x7e]+$/.test(node)) return node.replaceAll('%', '%%')
+  const copy = path.join(RUNTIME_DIR, 'node.exe')
+  const fingerprintFile = path.join(RUNTIME_DIR, 'node-source.json')
+  const source = fs.statSync(node)
+  const fingerprint = JSON.stringify({ node, version: source.size, mtimeMs: source.mtimeMs })
+  try {
+    if (fs.readFileSync(fingerprintFile, 'utf8') === fingerprint && fs.statSync(copy).size === source.size) {
+      return '%~dp0runtime\\node.exe'
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  const temp = `${copy}.${crypto.randomUUID()}.tmp`
+  try {
+    fs.copyFileSync(node, temp)
+    fs.renameSync(temp, copy)
+    writeIfChanged(fingerprintFile, fingerprint)
+  } finally {
+    fs.rmSync(temp, { force: true })
+  }
+  return '%~dp0runtime\\node.exe'
+}
+
 /**
  * 准备 Windows 用户级宿主，由插件启动和命令行安装器共用。
  * @param {string} extensionId 已发布扩展的 ID，用于 native messaging 白名单
@@ -186,11 +200,11 @@ function writeIfChanged(file, contents) {
  */
 export function ensureNativeHost(extensionId, { nodeArg } = {}) {
   if (!/^[a-p]{32}$/.test(extensionId)) throw new Error('扩展 ID 无效，无法注册浏览器宿主')
-  const node = resolveNode(nodeArg)
+  const node = path.resolve(resolveNode(nodeArg))
   writeIfChanged(path.join(RUNTIME_DIR, 'package.json'), '{"type":"module"}\n')
   writeIfChanged(LIB_RUNTIME, fs.readFileSync(path.join(ROOT, 'lib', 'protocol.js')))
   writeIfChanged(HOST_RUNTIME, fs.readFileSync(HOST_MJS))
-  const launcher = `@echo off\r\n"${node}" "${HOST_RUNTIME}" %*\r\n`
+  const launcher = `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"${nodeForLauncher(node)}" "%~dp0runtime\\host\\host.mjs" %*\r\n`
   writeIfChanged(HOST_CMD, launcher)
 
   // 宿主文件准备好之后才登记，避免浏览器发现未写完的注册清单。
@@ -234,11 +248,10 @@ function main() {
     return
   }
 
-  const { node, launcher, registrations } = ensureNativeHost(extId, { nodeArg })
+  const { node, registrations } = ensureNativeHost(extId, { nodeArg })
   ok(`node：${node}`)
   ok(`host 运行时：${RUNTIME_DIR}`)
   ok(`host 启动器：${HOST_CMD}`)
-  if (/[^\x20-\x7e\r\n]/.test(launcher)) warn('警告：启动器里仍有非 ASCII 字符，cmd.exe 可能解析出错')
   ok(`native manifest：${NM_FILE}`)
   for (const { label, error } of registrations) {
     if (error) warn(`注册 ${label} 失败：${error}`)

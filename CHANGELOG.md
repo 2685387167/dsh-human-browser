@@ -1,16 +1,25 @@
 # Changelog
 
-本项目遵循语义化版本。**版本号由维护者手动指定**：一次发版 = 一次提交 + 一个 GitHub Release；
-这里只记版本级的变化，日常修补不进日志。
+DSH 插件和 Chrome 扩展各自维护版本，通信协议版本也单独维护。
+DSH 安装标签用 `plugin-v<版本>`，扩展发布标签用 `extension-v<版本>`。旧版扩展继续使用原有标签。
 
-## 0.1.3 — 2026-11-23
+## DSH 插件 0.1.3 — 2026-11-24
+
+### 内测修订
+
+- 更新时按实际目录分别判断版本。保留较新的 profile 和额外文件，写入失败会尝试恢复本次替换的文件。
+- 磁盘已更新的 profile 等待浏览器自动重载，其他旧版 profile 仍可继续更新。
+- 下载由兼容的扩展推荐决定，使用 ZIP 的 SHA-256、清单版本与扩展 ID 校验，失败时保留原安装。
+- 更新接口复用 DSH Web 的登录、Host 和 Origin 检查。Windows 启动器支持中文安装路径。
+
+## Chrome 扩展 0.1.3 / DSH 插件 0.1.3 — 2026-11-23
 
 ### 新增
 
 - **扩展更新改为「GitHub Releases 下载 + 弹窗提示」**：插件包不再包含扩展；扩展按版本发布成 zip 挂在 Releases 上，旧版本全部保留，想用哪个自己下
 - 新增 `/human-browser/update/*` 四条路由（`status` / `install` / `progress` / `dismiss`），供 client 侧弹窗查询状态与触发安装
 - 新增 `lib/chrome-profile.js`：从 Chrome / Edge 的 **`Secure Preferences`** 读取扩展的真实加载路径与版本（注意不是 `Preferences`，那里是空的）
-- 新增 `lib/extension-updater.js`：下载 zip、解压、清单式覆盖安装（多余的旧文件会被删掉）、进度状态机
+- 新增 `lib/extension-updater.js`：下载 ZIP、解压、覆盖安装、进度状态机
 - 扩展侧新增自检：磁盘 manifest 版本**高于**运行版本时自动 `chrome.runtime.reload()`，覆盖后无需用户手动刷新
 - 扩展新增图标（16 / 32 / 48 / 128）
 - 新增**独立的协议版本字段**（扩展 `PROTOCOL` / 插件 `PLUGIN_PROTOCOL`）：两者解耦，版本号可以独立演进；协议不匹配时明确报「扩展协议 X，插件需要 Y」，不再静默失败
@@ -26,7 +35,7 @@
 - 版本比较统一用「严格小于」语义：用户把版本号改高（自己动过）时既不提示也不覆盖
 - Windows PowerShell 5.1 可以正常解压扩展 ZIP，插件启动时会注册并更新本机 native messaging host
 
-## 0.1.2 — 2026-11-20
+## Chrome 扩展 0.1.2 / DSH 插件 0.1.2 — 2026-11-20
 
 ### 修复
 
