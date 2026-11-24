@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "dsh-human-browser",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Drive the Chrome you already use — real CDP Input events, no injected scripts, no enabled domains.",
   "minimum_chrome_version": "116",
   "icons": {
@@ -13,6 +13,7 @@
   "permissions": [
     "debugger",
     "tabs",
+    "storage",
     "alarms",
     "nativeMessaging"
   ],

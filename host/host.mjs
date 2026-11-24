@@ -66,7 +66,9 @@ const stdioDecoder = new FrameDecoder((msg) => {
   vlog(`← 扩展 ${msg?.id ?? msg?.type}`)
   if (msg?.type === 'hello') {
     if (extensionHello) return
-    extensionHello = { version: msg.version, protocol: msg.protocol }
+    extensionHello = {
+      version: msg.version, protocol: msg.protocol, supportsReload: msg.supportsReload === true,
+    }
     if (firstHelloTimer) {
       clearTimeout(firstHelloTimer)
       firstHelloTimer = null

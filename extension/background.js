@@ -34,15 +34,27 @@ const VERSION = chrome.runtime.getManifest().version
 const PROTOCOL = 1
 const SNAP_TTL = 5 * 60 * 1000
 const MAX_NODES = 260
+const GLOBAL_AUTHORIZATION_KEY = 'hb-global-authorization'
+const GLOBAL_SCRIPT_EXECUTION_KEY = 'hb-global-script-execution'
+const TAB_AUTHORIZATION_KEY = 'hb-tab-authorization'
 
 // ── 状态 ────────────────────────────────────────────────────────────────────
 
 /** 已 attach 的 tabId */
 const attached = new Set()
-/** 当前浏览器会话内，由用户授权的标签页及其来源。 */
+/** 当前浏览器会话内已授权的标签页及其来源。 */
 const grants = new Map()
+/** 每个标签页已加载的来源，用于保留初始决定和单页撤销。 */
+const seenOrigins = new Map()
+let globalAuthorization = false
+/** 已授权标签页执行脚本的默认状态，逐页设置优先。 */
+let globalScriptExecution = false
+let tabAuthorizationWrites = Promise.resolve()
+let globalSettingsWrites = Promise.resolve()
 /** 并发请求共用同一次 debugger attach。 */
 const attaching = new Map()
+/** 跨来源后重新接管前，等待旧来源的调试连接释放。 */
+const detaching = new Map()
 /** tabId -> { objectId, snapshotId, count, at } */
 const snaps = new Map()
 /** tabId -> { x, y } 上一次鼠标位置，轨迹从这里出发才连续 */
@@ -53,6 +65,9 @@ let connectTimer = null
 let backoff = 1000
 let lastError = ''
 let hostReady = false
+/** 等请求完成并发出回执后再销毁服务工作线程。 */
+let reloadRequested = false
+let reloadTimer = null
 /** 当前 DSH 连接上的待执行请求，包括排队和运行中的请求。 */
 const operations = new Map()
 const tabQueues = new Map()
@@ -70,6 +85,7 @@ function disconnected(message) {
   lastError = message
   abortOperations(message)
   operations.clear()
+  scheduleReload()
 }
 
 // ── native messaging ────────────────────────────────────────────────────────
@@ -89,7 +105,7 @@ function connectHost() {
     nativePort = chrome.runtime.connectNative(HOST_NAME)
     port = nativePort
     // 扩展只上报自己的身份，宿主转发时补充会话 token 和进程号。
-    nativePort.postMessage({ type: 'hello', version: VERSION, protocol: PROTOCOL })
+    nativePort.postMessage({ type: 'hello', version: VERSION, protocol: PROTOCOL, supportsReload: true })
   } catch (e) {
     lastError = String(e?.message || e)
     port = null
@@ -104,6 +120,7 @@ function connectHost() {
       hostReady = true
       backoff = 1000
       lastError = ''
+      void checkSelfUpdate()
     } else if (msg?.type === 'host-disconnected') {
       disconnected(msg.reason || 'DSH 未连接')
     } else if (msg?.type === 'cancel') {
@@ -124,61 +141,61 @@ function connectHost() {
 
 }
 
-// MV3 service worker 会休眠；alarms 是唯一可靠的再唤醒手段
+// 保留断线重连用的定时唤醒，升级检查改为启动、重连或 DSH 通知时触发。
 chrome.alarms.create('hb-keepalive', { periodInMinutes: 1 })
-// 扩展文件被外部更新后要自己重载，单独一个 alarm，别跟连接保活混在一起
-chrome.alarms.create('hb-self-update', { periodInMinutes: 5 })
+void chrome.alarms.clear('hb-self-update')
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === 'hb-keepalive' && !port) connectHost()
-  if (a.name === 'hb-self-update') void checkSelfUpdate()
 })
 chrome.runtime.onStartup.addListener(() => {
   connectHost()
-  void checkSelfUpdate()
 })
 chrome.runtime.onInstalled.addListener(() => connectHost())
 connectHost()
 void checkSelfUpdate()
 
 /**
- * 自检：磁盘上的 manifest.json 版本是否比正在跑的这一版新。
- *
- * 为什么需要：DSH 插件更新扩展时，是把文件覆盖到我们**加载的那个目录**；但 Chrome 不会
- * 自动重读 unpacked 扩展，必须扩展自己调 `chrome.runtime.reload()`。判断依据就是
- * 「磁盘上的版本 > 运行中的版本」。
- *
- * 三条边界：
- *  - 加 cache-bust：unpacked 扩展读的是实时磁盘文件，但 HTTP 缓存那层要绕开
- *  - **只在更新时才重载**：用户手动把版本号改高时，磁盘版本反而"更新"，但我们要按
- *    「只升不降」的约定不动他，所以用 isNewer 严格比较而不是 !=
- *  - 自检失败一律静默：读不到 manifest 不该影响正常的浏览器操作
+ * 只检查这个扩展所加载的目录。收到 DSH 通知时还须匹配目标版本，
+ * 避免当前连上的浏览器配置重载另一个配置刚完成的更新。
  */
-async function checkSelfUpdate() {
+async function newerDiskVersion(expectedVersion) {
   try {
-    const running = VERSION
     const url = `${chrome.runtime.getURL('manifest.json')}?t=${Date.now()}`
     const res = await fetch(url, { cache: 'no-store' })
-    if (!res.ok) return
+    if (!res.ok) return false
     const disk = await res.json()
-    const next = String(disk?.version || '')
-    if (!next || next === running) return
-    if (!isNewerVersion(next, running)) return
-    // reload 会立刻掐断这个 worker，先记一笔，popup 下次打开能看到发生了什么
-    try {
-      if (chrome.storage?.session?.set) await chrome.storage.session.set({ pendingUpdate: { from: running, to: next } })
-    } catch {}
-    chrome.runtime.reload()
+    const next = disk?.version
+    return (expectedVersion === undefined || next === expectedVersion) && isNewerVersion(next, VERSION)
   } catch {
-    /* 读不到磁盘 manifest 时不做事 */
+    return false
   }
 }
 
-/** a 是否严格新于 b（只比 x.y.z 的数字段，预发布标签在这条链路上不参与判断） */
+/** 启动或重连时补查一次，覆盖更新完成时未接到通知的情况。 */
+async function checkSelfUpdate() {
+  if (reloadRequested || !(await newerDiskVersion())) return
+  reloadRequested = true
+  scheduleReload()
+}
+
+/** 等未完成的浏览器请求退出；短暂让出事件循环让 Native Messaging 送出回执。 */
+function scheduleReload() {
+  if (!reloadRequested || operations.size || reloadTimer !== null) return
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null
+    if (operations.size) return
+    reloadRequested = false
+    chrome.runtime.reload()
+  }, 100)
+}
+
+/** Chromium 的清单版本由最多四段整数构成，只接受严格更新。 */
 function isNewerVersion(a, b) {
-  const parse = (v) => String(v || '').split('-')[0].split('.').map((n) => parseInt(n, 10) || 0)
-  const A = parse(a)
-  const B = parse(b)
-  for (let i = 0; i < 3; i++) {
+  if (typeof a !== 'string' || !/^(0|[1-9]\d{0,4})(\.(0|[1-9]\d{0,4})){0,3}$/.test(a)) return false
+  const A = a.split('.').map(Number)
+  const B = b.split('.').map(Number)
+  if (A.some((n) => n > 65535)) return false
+  for (let i = 0; i < 4; i++) {
     const x = A[i] || 0
     const y = B[i] || 0
     if (x !== y) return x > y
@@ -192,7 +209,7 @@ function send(tabId, method, params) {
   return chrome.debugger.sendCommand({ tabId: Number(tabId) }, method, params || {})
 }
 
-/** 只允许用户明确选中的 HTTP(S) 页面，不授权浏览器内部页面。 */
+/** 授权范围为 HTTP(S) 来源，包括协议、域名和端口。 */
 function httpOrigin(url) {
   try {
     const parsed = new URL(url)
@@ -201,14 +218,106 @@ function httpOrigin(url) {
   return null
 }
 
+/** 恢复会话授权。扩展刚启用时，将当时已打开的网页登记为已加载。 */
+async function loadAuthorization() {
+  const [settings, session, tabs] = await Promise.all([
+    chrome.storage.local.get([GLOBAL_AUTHORIZATION_KEY, GLOBAL_SCRIPT_EXECUTION_KEY]),
+    chrome.storage.session.get(TAB_AUTHORIZATION_KEY),
+    chrome.tabs.query({}),
+  ])
+  const saved = session[TAB_AUTHORIZATION_KEY]
+  if (saved) {
+    const openTabs = new Map(tabs.map((tab) => [tab.id, tab]))
+    for (const [tabId, origins, grantedOrigin, scriptsBlocked] of saved) {
+      const tab = openTabs.get(tabId)
+      if (!tab) continue
+      seenOrigins.set(tabId, new Set(origins))
+      if (grantedOrigin && httpOrigin(tab.url) === grantedOrigin) {
+        grants.set(tabId, { origin: grantedOrigin, ...(scriptsBlocked === true ? { eval: false } : {}) })
+      }
+    }
+  } else {
+    for (const tab of tabs) rememberOrigin(tab.id, httpOrigin(tab.url))
+    await saveTabAuthorization()
+  }
+  globalAuthorization = settings[GLOBAL_AUTHORIZATION_KEY] === true
+  globalScriptExecution = settings[GLOBAL_SCRIPT_EXECUTION_KEY] === true
+}
+
+const authorizationReady = loadAuthorization().catch((error) => {
+  console.warn('无法恢复扩展授权设置', error)
+})
+
+/** 依照变更顺序写入会话。保留逐页脚本禁用，手动允许仅适用于当前文档。 */
+function saveTabAuthorization() {
+  const entries = [...seenOrigins].map(([id, origins]) => {
+    const grant = grants.get(id)
+    return [id, [...origins], grant?.origin ?? null, grant?.eval === false]
+  })
+  const save = tabAuthorizationWrites.then(() => chrome.storage.session.set({ [TAB_AUTHORIZATION_KEY]: entries }))
+  tabAuthorizationWrites = save.catch((error) => console.warn('无法保存标签页授权', error))
+  return save
+}
+
+/** 记录某来源第一次在这个标签页加载，刷新和返回已访问来源时返回 false。 */
+function rememberOrigin(tabId, origin) {
+  if (tabId == null || !origin) return false
+  let origins = seenOrigins.get(tabId)
+  if (!origins) {
+    origins = new Set()
+    seenOrigins.set(tabId, origins)
+  }
+  if (origins.has(origin)) return false
+  origins.add(origin)
+  return true
+}
+
+/** 新来源采用当前默认值。后续授权由原有的逐页控制负责。 */
+function applyDefaultAuthorization(tabId, url) {
+  const origin = httpOrigin(url)
+  if (!rememberOrigin(tabId, origin)) return
+  if (globalAuthorization) grants.set(tabId, { origin })
+  void saveTabAuthorization().catch(() => {})
+}
+
+/** 按顺序保存弹窗修改的全局设置，成功后应用新的默认值。 */
+function setGlobalSetting(key, enabled) {
+  const save = globalSettingsWrites.then(async () => {
+    await chrome.storage.local.set({ [key]: enabled })
+    if (key === GLOBAL_AUTHORIZATION_KEY) globalAuthorization = enabled
+    else globalScriptExecution = enabled
+  })
+  globalSettingsWrites = save.catch(() => {})
+  return save
+}
+
+/** 调用方须先核对页面授权，逐页脚本决定优先于全局默认。 */
+function canEvaluate(grant) {
+  return grant.eval ?? globalScriptExecution
+}
+
+/** 手动允许只适用于当前文档。覆盖全局默认的禁用保留到该标签页撤权。 */
+async function setTabScriptExecution(grant, enabled) {
+  const wasBlocked = grant.eval === false
+  if (enabled) grant.eval = true
+  else if (globalScriptExecution) grant.eval = false
+  else if (grant.eval === true) delete grant.eval
+  if (wasBlocked !== (grant.eval === false)) await saveTabAuthorization()
+}
+
+/** 提交和待提交的页面必须与授权来源相同。 */
+function grantMatchesTab(grant, tab) {
+  return !!grant && grant.origin === httpOrigin(tab?.url) &&
+    (!tab.pendingUrl || grant.origin === httpOrigin(tab.pendingUrl))
+}
+
 /** 在调用时核对实时 URL，避免导航事件尚未到达时沿用旧授权。 */
 async function authorizedTab(tabId) {
   const id = Number(tabId)
   const grant = grants.get(id)
   if (!grant) throw new Error(`请在扩展弹窗授权标签页 ${id}`)
   const tab = await chrome.tabs.get(id)
-  if (grants.get(id) !== grant || httpOrigin(tab.url) !== grant.origin ||
-      (tab.pendingUrl && httpOrigin(tab.pendingUrl) !== grant.origin)) {
+  if (grants.get(id) !== grant || !grantMatchesTab(grant, tab)) {
     throw new Error('页面已变化，请在扩展弹窗重新授权')
   }
   return { tab, grant }
@@ -216,6 +325,7 @@ async function authorizedTab(tabId) {
 
 /** attach 的归属只由本扩展实际建立的连接确认。 */
 async function ensureAttached(tabId) {
+  await detaching.get(Number(tabId))?.catch(() => {})
   const { tab, grant } = await authorizedTab(tabId)
   const id = tab.id
   if (attached.has(id)) return id
@@ -256,35 +366,75 @@ function dropAttached(tabId) {
   mouseAt.delete(Number(tabId))
 }
 
-// 用户关标签页 / 浏览器回收时清账，避免 attached 里留幽灵
 /** 撤销接管并取消该页的排队请求与正在执行的操作。 */
 async function revokeTab(tabId, message) {
   grants.delete(tabId)
   abortOperations(message, (op) => op.tabId === tabId)
-  if (attached.has(tabId)) {
-    try { await chrome.debugger.detach({ tabId }) } finally { dropAttached(tabId) }
-  } else {
-    dropAttached(tabId)
+  const wasAttached = attached.has(tabId)
+  dropAttached(tabId)
+  let detach
+  if (wasAttached) {
+    detach = chrome.debugger.detach({ tabId }).finally(() => detaching.delete(tabId))
+    detaching.set(tabId, detach)
   }
+  await Promise.all([detach, saveTabAuthorization()])
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+/** 标签页关闭后清理授权及已加载来源。 */
+function forgetTab(tabId) {
+  const seen = seenOrigins.delete(tabId)
   grants.delete(tabId)
   dropAttached(tabId)
   abortOperations('标签页已关闭', (op) => op.tabId === tabId && op.method !== 'close')
+  if (seen) void saveTabAuthorization().catch(() => {})
+}
+
+chrome.tabs.onCreated.addListener((tab) => {
+  void authorizationReady.then(() => applyDefaultAuthorization(tab.id, tab.url))
 })
-chrome.tabs.onUpdated.addListener((tabId, change) => {
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void authorizationReady.then(() => forgetTab(tabId))
+})
+chrome.tabs.onReplaced.addListener((tabId, previousId) => {
+  void authorizationReady.then(async () => {
+    // Chrome 预渲染替换标签页时，保留旧标签页已经作出的逐来源决定。
+    const previousOrigins = seenOrigins.get(previousId)
+    const previousGrant = grants.get(previousId)
+    if (previousOrigins) {
+      seenOrigins.set(tabId, new Set([...previousOrigins, ...(seenOrigins.get(tabId) ?? [])]))
+      const replacementGrant = grants.get(tabId)
+      if (previousOrigins.has(replacementGrant?.origin) && previousGrant?.origin !== replacementGrant.origin) {
+        void revokeTab(tabId, '保留原标签页的授权决定').catch(() => {})
+      } else if (previousGrant) {
+        const grant = replacementGrant ?? { origin: previousGrant.origin }
+        if (grant.origin === previousGrant.origin && previousGrant.eval === false) grant.eval = false
+        grants.set(tabId, grant)
+      }
+    }
+    forgetTab(previousId)
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    if (tab) updateTabAuthorization(tabId, { url: tab.url }, tab)
+  })
+})
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+  void authorizationReady.then(() => updateTabAuthorization(tabId, change, tab))
+})
+
+/** 保留原有的导航撤销逻辑，再为尚未加载过的来源应用默认授权。 */
+function updateTabAuthorization(tabId, change, tab) {
   const grant = grants.get(tabId)
-  if (change.url && grant && httpOrigin(change.url) !== grant.origin) {
+  const committedUrl = change.url ?? (change.status === 'complete' ? tab?.url : undefined)
+  if (committedUrl && grant && httpOrigin(committedUrl) !== grant.origin) {
     void revokeTab(tabId, '页面已离开授权来源').catch(() => {})
   } else if (change.status === 'loading' || change.url) {
-    if (grant) grant.eval = false
+    if (grant?.eval === true) delete grant.eval
     const previous = snaps.get(tabId)
     snaps.delete(tabId)
     if (previous) void send(tabId, 'Runtime.releaseObject', { objectId: previous.objectId }).catch(() => {})
     abortOperations('页面已导航，请重新确认目标', (op) => op.tabId === tabId && op.documentBound)
   }
-})
+  if (committedUrl) applyDefaultAuthorization(tabId, committedUrl)
+}
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   abortOperations('前台标签页已切换', (op) => op.inputStarted && op.tabId !== tabId)
 })
@@ -292,10 +442,11 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   abortOperations('浏览器窗口焦点已变化', (op) => op.inputStarted && op.windowId !== windowId)
 })
 chrome.debugger.onDetach.addListener((source) => {
-  if (source?.tabId != null) {
+  if (attached.has(source?.tabId)) {
     grants.delete(source.tabId)
     dropAttached(source.tabId)
     abortOperations('Chrome 调试会话已断开', (op) => op.tabId === source.tabId && op.method !== 'close')
+    void saveTabAuthorization().catch(() => {})
   }
 })
 
@@ -628,11 +779,21 @@ async function startInput(tabId, op) {
 // ── 请求分发 ────────────────────────────────────────────────────────────────
 
 const METHODS = {
+  /** 只接受 DSH 指明且本目录已经写好的目标版本。 */
+  async reloadExtension({ version }, op) {
+    const scheduled = typeof version === 'string' && await newerDiskVersion(version)
+    op.check()
+    if (scheduled) reloadRequested = true
+    return { scheduled }
+  },
+
   async status() {
     const tabs = await chrome.tabs.query({})
     return {
       version: VERSION,
       protocol: PROTOCOL,
+      globalAuthorization,
+      globalScriptExecution,
       attached: [...attached],
       authorized: [...grants.keys()],
       tabCount: tabs.length,
@@ -647,7 +808,7 @@ const METHODS = {
       .filter((t) => t.id != null)
       .map((t) => {
         const grant = grants.get(t.id)
-        const authorized = !!grant && grant.origin === httpOrigin(t.url) && (!t.pendingUrl || grant.origin === httpOrigin(t.pendingUrl))
+        const authorized = grantMatchesTab(grant, t)
         return {
           id: t.id,
           title: authorized ? (t.title || '').slice(0, 90) : '',
@@ -671,7 +832,7 @@ const METHODS = {
   async open({ url, background }) {
     if (!httpOrigin(url)) throw new Error('只允许打开 HTTP 或 HTTPS 网址')
     const tab = await chrome.tabs.create({ url, active: !background })
-    return { tabId: tab?.id ?? null, url }
+    return { tabId: tab?.id ?? null, url, globalAuthorization }
   },
 
   async close({ tabId }) {
@@ -905,10 +1066,12 @@ const METHODS = {
 
   async evaluate({ tabId, expression }, op) {
     const { grant } = await authorizedTab(tabId)
-    if (!grant.eval) throw new Error('请先在扩展弹窗单独允许本页执行脚本')
+    if (!canEvaluate(grant)) throw new Error('请先在扩展弹窗单独允许本页执行脚本')
     const id = await ensureAttached(tabId)
+    // 调试器连接期间，页面权限或全局脚本设置可能已被用户更改。
+    const { grant: currentGrant } = await authorizedTab(id)
     op.check()
-    if (!grant.eval) throw new Error('脚本执行授权已撤销')
+    if (currentGrant !== grant || !canEvaluate(currentGrant)) throw new Error('脚本执行授权已撤销')
     const r = await evaluate(id, `(() => { const __v = (${expression}); return { value: typeof __v === 'undefined' ? null : __v }; })()`, {
       byValue: true,
       awaitPromise: false,
@@ -972,7 +1135,7 @@ const METHODS = {
 
 /** 页面状态或输入有先后关系的请求，在同一标签页上依次执行。 */
 const serializedMethods = new Set(['activate', 'close', 'snapshot', 'elementBox', 'click', 'hover', 'type', 'key', 'scroll', 'screenshot', 'evaluate'])
-const globalMethods = new Set(['status', 'tabs', 'open', 'detach'])
+const globalMethods = new Set(['status', 'tabs', 'open', 'detach', 'reloadExtension'])
 
 async function handleRequest(msg, nativePort) {
   const { id, method } = msg
@@ -999,6 +1162,7 @@ async function handleRequest(msg, nativePort) {
   try {
     if (!Object.hasOwn(METHODS, method)) throw new Error(`未知方法：${method}`)
     const run = async () => {
+      await authorizationReady
       op.check()
       if (!global) await authorizedTab(tabId)
       op.check()
@@ -1021,11 +1185,13 @@ async function handleRequest(msg, nativePort) {
     reply({ ok: false, error: String(e?.message || e) })
   } finally {
     if (operations.get(id) === op) operations.delete(id)
+    scheduleReload()
   }
 }
 
 /** 授权只从插件弹窗进入。再次核对用户看到的标签页与来源。 */
 async function popupRequest(msg) {
+  await authorizationReady
   if (msg.type === 'hb-reconnect') {
     const previous = port
     port = null
@@ -1034,15 +1200,21 @@ async function popupRequest(msg) {
     connectHost()
     return { ok: true }
   }
+  if (msg.type === GLOBAL_AUTHORIZATION_KEY || msg.type === GLOBAL_SCRIPT_EXECUTION_KEY) {
+    if (typeof msg.enabled !== 'boolean') throw new Error('全局设置状态无效')
+    await setGlobalSetting(msg.type, msg.enabled)
+    return { ok: true }
+  }
 
   const [current] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
   const origin = httpOrigin(current?.url)
   const grant = grants.get(current?.id)
   if (msg.type === 'hb-status') {
-    const authorized = !!origin && grant?.origin === origin && (!current.pendingUrl || httpOrigin(current.pendingUrl) === origin)
+    const authorized = grantMatchesTab(grant, current)
     return {
       connected: hostReady, attached: [...attached], authorizedCount: grants.size, lastError, version: VERSION,
-      tabId: current?.id, origin, authorized, eval: authorized && grant.eval === true,
+      tabId: current?.id, origin, authorized, eval: authorized && canEvaluate(grant),
+      globalAuthorization, globalScriptExecution,
     }
   }
   if (!origin || current.id !== msg.tabId || origin !== msg.origin ||
@@ -1050,19 +1222,28 @@ async function popupRequest(msg) {
     throw new Error('当前标签页已变化，请重新打开弹窗')
   }
   if (msg.type === 'hb-grant') {
-    if (grant?.origin !== origin) grants.set(current.id, { origin, eval: false })
+    rememberOrigin(current.id, origin)
+    if (grant?.origin !== origin) {
+      grants.set(current.id, { origin })
+      await saveTabAuthorization()
+    }
   } else if (msg.type === 'hb-revoke') {
+    rememberOrigin(current.id, origin)
     await revokeTab(current.id, '用户已撤销标签页授权')
   } else if (msg.type === 'hb-eval') {
     if (!grant || grant.origin !== origin) throw new Error('请先授权此标签页')
-    grant.eval = msg.enabled === true
+    if (typeof msg.enabled !== 'boolean') throw new Error('脚本执行状态无效')
+    await setTabScriptExecution(grant, msg.enabled)
   }
   return { ok: true }
 }
 
+/** 仅扩展弹窗可查询或修改用户权限。 */
+const popupActions = ['hb-status', 'hb-reconnect', GLOBAL_AUTHORIZATION_KEY, GLOBAL_SCRIPT_EXECUTION_KEY,
+  'hb-grant', 'hb-revoke', 'hb-eval']
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (sender.url !== chrome.runtime.getURL('popup.html') ||
-      !['hb-status', 'hb-reconnect', 'hb-grant', 'hb-revoke', 'hb-eval'].includes(msg?.type)) return false
+      !popupActions.includes(msg?.type)) return false
   void popupRequest(msg).then(sendResponse, (error) => sendResponse({ error: error.message }))
   return true
 })

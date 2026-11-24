@@ -24,6 +24,11 @@
       background: #221f2a; color: #ece8f2; font: inherit; cursor: pointer;
     }
     button:hover { background: #2a2634; }
+    button:disabled { opacity: .55; cursor: default; }
+    .switch { display: flex; justify-content: space-between; align-items: center; }
+    .switch-state { color: #a9a4b8; font-size: 11px; }
+    .switch[aria-checked="true"] .switch-state { color: #86efac; }
+    .switch-note { margin: 5px 2px 0; color: #a9a4b8; font-size: 11px; }
     .note { margin-top: 11px; padding-top: 10px; border-top: 1px solid #29262f; color: #7d7889; font-size: 11px; line-height: 1.55; }
     code { color: #c9b6ff; font-size: 11px; }
   </style>
@@ -35,6 +40,16 @@
   <div class="row"><span class="k">DSH 连接</span><span id="conn"><span class="dot off"></span>未连接</span></div>
   <div class="row"><span class="k">已授权标签页</span><span id="tabs">0</span></div>
   <div class="row"><span class="k">版本</span><span id="ver">—</span></div>
+
+  <button id="global-access" class="switch" role="switch" aria-checked="false" aria-describedby="global-note" disabled>
+    <span>全局授权</span><span id="global-access-state" class="switch-state" aria-hidden="true">关闭</span>
+  </button>
+  <div class="switch-note" id="global-note">只决定新网页的初始授权，可单独撤销当前标签页。</div>
+
+  <button id="global-scripts" class="switch" role="switch" aria-checked="false" aria-describedby="scripts-note" disabled>
+    <span>全局脚本执行权限</span><span id="global-scripts-state" class="switch-state" aria-hidden="true">关闭</span>
+  </button>
+  <div class="switch-note" id="scripts-note">已授权的网页默认可运行脚本，可逐页禁用。</div>
 
   <button id="access" disabled>授权当前标签页</button>
   <button id="scripts" disabled>允许本页执行脚本</button>

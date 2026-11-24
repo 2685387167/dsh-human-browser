@@ -301,7 +301,7 @@ export const TOOLS = [
   defineTool({
     name: 'browser_status',
     description:
-      '看浏览器连接状态：扩展是否接上、已接管几个标签页、快照是否还有效。任何 browser_* 报「还没接上」时先调这个。',
+      '查看用户正在用的 Chrome 的扩展连接、网页授权和快照状态。需要操作浏览器时优先使用 browser_*；首次使用或连接状态不明时先调用此工具。',
     parameters: {},
     output: textOutput,
     async execute() {
@@ -327,6 +327,12 @@ export const TOOLS = [
       if (b?.connected) {
         const s = await b.request('status', {}, 8000)
         lines.push(`扩展版本：${s.version}`)
+        if (typeof s.globalAuthorization === 'boolean') {
+          lines.push(`全局授权：${s.globalAuthorization ? '开启' : '关闭'}`)
+        }
+        if (typeof s.globalScriptExecution === 'boolean') {
+          lines.push(`全局脚本执行权限：${s.globalScriptExecution ? '开启' : '关闭'}`)
+        }
         lines.push(`已授权标签页：${s.authorized?.join(', ') || '无'}`)
         lines.push(`已 attach 的标签页：${s.attached.length ? s.attached.join(', ') : '无'}`)
         if (s.snaps.length) {
@@ -361,7 +367,7 @@ export const TOOLS = [
 
   defineTool({
     name: 'browser_tabs',
-    description: '列标签页 / 打开新标签页 / 关标签页 / 切到某个标签页。* 标记的是用户正在看的那个。',
+    description: '列出、打开、关闭或切换用户现有 Chrome 的标签页。open 在现有窗口打开标签页，无法创建新窗口或无痕窗口。* 标记当前活动标签页。',
     parameters: {
       action: { type: 'string', required: true, enum: ['list', 'open', 'close', 'activate'], description: 'list=列出，open=打开新标签页，close=关闭，activate=切过去' },
       tab: { type: 'integer', description: '标签页 id（close / activate 用）' },
@@ -384,7 +390,10 @@ export const TOOLS = [
         if (!args.url) throw new Error('open 需要 url')
         const r = await b.request('open', { url: args.url, background: !!args.background }, 30000)
 
-        return { text: `已打开标签页 ${r.tabId}：${r.url}${args.background ? '（后台）' : ''}。请在 Chrome 扩展弹窗授权此页后继续。` }
+        const grantHint = r.globalAuthorization
+          ? '全局授权已开启。页面加载后可用 browser_tabs 查看授权状态。'
+          : '请在 Chrome 扩展弹窗授权此页后继续。'
+        return { text: `已打开标签页 ${r.tabId}：${r.url}${args.background ? '（后台）' : ''}。${grantHint}` }
       }
       if (args.action === 'close') {
         if (args.tab == null) throw new Error('close 需要 tab')
@@ -408,7 +417,7 @@ export const TOOLS = [
     name: 'browser_snapshot',
     description:
       '读当前页面的**可交互元素**清单，每个元素带完整 ref 和可读标签。点击/输入原样传入 ref。' +
-      '这是操作页面的第一步；页面变了（跳转、弹窗、列表刷新）要重新快照。',
+      '确认目标标签页后先快照再操作；页面变了（跳转、弹窗、列表刷新）要重新快照。',
     parameters: {
       tab: { type: 'integer', description: '标签页 id，省略就用当前页' },
       max: { type: 'integer', description: '最多列多少个元素，默认 260' },
@@ -766,7 +775,7 @@ export const TOOLS = [
   defineTool({
     name: 'browser_eval',
     description:
-      '在当前授权页面执行 JavaScript 表达式并返回 JSON 结果。脚本可以修改页面，须先在扩展弹窗单独授权。',
+      '在已授权且允许脚本执行的页面求值 JavaScript 并返回 JSON。脚本可以修改页面，权限由扩展弹窗管理。',
     parameters: {
       expression: { type: 'string', required: true, description: '要执行的表达式，最后求值结果会返回' },
       tab: { type: 'integer', description: '标签页 id' },
@@ -857,6 +866,18 @@ export const TOOLS = [
 export const name = 'human-browser'
 export const inject = ['tools']
 
+/** 随插件加载的默认工具指引，适用于需要实际浏览器交互的任务。 */
+const BROWSER_ROUTING_SECTION = {
+  name: 'plugin:dsh-human-browser:routing',
+  order: 800,
+  text: [
+    '用户要求打开网页、点击、输入、截图或操作已有浏览器会话时，优先使用可用的 dsh-human-browser browser_* 工具。首次操作或连接状态不明时用 browser_status 核对连接，再用 browser_tabs 确认目标标签页。',
+    '网页未授权时请用户在扩展弹窗授权。插件断线或缺少所需能力时说明限制，等待用户决定。用户明确要求独立浏览器或同意替代方式时，才通过 shell 或其他浏览器自动化工具另开实例。',
+    'browser_tabs open 在现有 Chrome 窗口打开标签页。任务指定无痕等窗口类型时，只在确认窗口类型匹配后读取或操作网页。需要新建无痕窗口时，说明限制，请用户在 Chrome 中打开并允许扩展在无痕模式运行，等待用户确认后继续。',
+    '只查询公开资料、无需操作浏览器时，可以直接使用 web_search 或 web_fetch。',
+  ].join('\n'),
+}
+
 /** 注册失败时保留插件与更新路由，让诊断工具还能显示实际原因。 */
 function prepareNativeHost(owner, extensionId) {
   if (process.platform !== 'win32') return
@@ -910,6 +931,15 @@ export function apply(ctx) {
   }
   log(`已注册 ${TOOLS.length} 个工具`)
 
+  // 支持该服务的 DSH 会自动在插件卸载时移除指引。只有工具服务的运行环境仍能加载插件。
+  ctx.inject?.(['systemPrompt'], (sub) => {
+    try {
+      sub.systemPrompt?.section?.(BROWSER_ROUTING_SECTION)
+    } catch (error) {
+      log(`注册浏览器工具指引失败（忽略）：${error?.message}`)
+    }
+  })
+
   // ── 扩展更新的 HTTP 路由（给 client 侧弹窗用，契约见 docs/update-api.md）──
   // webServer 在 headless profile 里可能没有，挂不上也不影响工具，只影响弹窗。
   try {
@@ -919,6 +949,8 @@ export function apply(ctx) {
       const updater = new ExtensionUpdater({
         extensionId: meta.extensionId,
         extensionVersionFile: path.join(__dirname, 'extension-version.json'),
+        // 卸载或替换插件后，旧更新任务不能借用新实例的桥接。
+        requestReload: (version) => lifecycle === owner && owner.bridge?.reloadExtension(version),
         log,
       })
       owner.updater = updater

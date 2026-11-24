@@ -4,7 +4,7 @@
 
 不是另开一个浏览器，是接管你已经登录、有历史、装了扩展的那个窗口。
 
-> Windows only · 需要 Chrome 或 Edge 116+ · 扩展通过 GitHub Release 分发，由插件自动安装
+> 仅 Windows · 需要 Chrome 或 Edge 116+ · 扩展从 GitHub Releases 下载，首次需手动加载
 
 ---
 
@@ -54,12 +54,14 @@
 | `browser_scroll` | 按像素 / 滚到顶底 / 滚到某元素 |
 | `browser_wait` | 等选择器、等网址、等时长（轮询，不注入观察器） |
 | `browser_screenshot` | 截图，直接给模型看 |
-| `browser_eval` | 页面 JS（需单独授权） |
+| `browser_eval` | 页面 JS（需要网页授权和脚本执行权限） |
 | `browser_stealth` | 反检测自检，报四层信号实测值 |
 | `browser_detach` | 释放接管并撤销授权 |
 | `browser_cleanup` | 显式清理 native host，返回实际处理结果 |
 
 15 个工具的 schema 合计约 7500 字节（≈1900 tokens），是每次请求都要付的固定成本。
+
+启用插件后，需要在现有 Chrome 中打开网页、点击、输入或截图时，DSH 默认优先使用 `browser_*`。首次操作或连接状态不明时会检查连接，遇到断线、未授权或能力限制时会说明情况。只查询公开资料时仍可直接使用网页搜索或抓取。
 
 ---
 
@@ -73,10 +75,10 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 
 装好后重启 DSH。插件会在加载时自动注册 native messaging host（写 HKCU 注册表，不需要管理员）。
 
-如需固定安装 DSH 插件 0.1.3，使用下面的命令。GitHub Release 的 `v0.1.3` 对应 Chrome 扩展资产。
+如需固定安装 DSH 插件 0.1.4，使用下面的命令。配套的 Chrome 扩展资产见 [Chrome 扩展 0.1.4](https://github.com/2685387167/dsh-human-browser/releases/tag/extension-v0.1.4)。
 
 ```powershell
-dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.1.3'
+dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.1.4'
 ```
 
 从旧版升级后，重启 DSH 会同步更新本机 native host。若 `browser_status` 显示宿主注册失败，可以在插件目录运行 `node scripts/install.mjs --check` 检查注册，或运行 `node scripts/install.mjs` 手动修复。
@@ -85,8 +87,8 @@ dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.
 
 插件启动后会检测你 Chrome 里的扩展版本：
 
-- **没装过** → 弹窗提示「下载并安装」，点一下自动下载解压，再到 `chrome://extensions` 打开「开发者模式」，选择「加载已解压的扩展程序」并选中提示的目录
-- **装过但低于推荐版** → 弹窗提示「更新」，逐个更新可验证的旧版解压目录。保持开发者模式开启，扩展会在下一次版本自检时重载，通常在五分钟内
+- **首次安装** → 在提示中点「下载并安装」。解压完成后，打开 `chrome://extensions`，开启「开发者模式」，点「加载已解压的扩展程序」，选择提示中的目录。
+- **升级扩展** → 在提示中点「更新」，插件会更新可验证的旧版解压目录，并通知已连接且支持主动重载的扩展。首次从 0.1.3 升到 0.1.4 时，可等待旧版扩展自检。升级后仍等待重载时，可在 `chrome://extensions` 点击「重新加载」。
 
 扩展的每个版本都发布在 [Releases](https://github.com/2685387167/dsh-human-browser/releases) 上，旧版本保留。想用特定版本可以自己下载解压再用 `chrome://extensions` 加载。
 
@@ -94,9 +96,13 @@ DSH 插件版本和 Chrome 扩展版本独立维护。插件读取线上 [扩展
 
 ### 3. 授权
 
-装好扩展后，**每个要操作的页面都要在扩展弹窗点一次「授权当前标签页」**。需要 `browser_eval` 时再点「允许本页执行脚本」。
+在浏览器扩展弹窗中管理授权。「全局授权」默认关闭，可逐页点「授权当前标签页」。也可以打开「全局授权」，让标签页首次加载某个 HTTP(S) 来源时自动授权。开关只决定新页面的初始状态，已经加载的网页保留当前授权状态。
 
-跨来源导航后授权失效，需要重新授权。
+可以随时点「撤销当前标签页授权」。刷新或在同一标签页返回该来源后，可手动重新授权。跨来源导航时，原来源的授权随之结束。
+
+「全局脚本执行权限」默认关闭。开启后，已授权的网页默认可以使用 `browser_eval`，刷新后继续生效。可用「禁用本页脚本执行」覆盖全局默认，直到手动恢复或标签页撤权。
+
+全局脚本权限关闭时，也可以单独点「允许本页执行脚本」。单独允许适用于当前文档，刷新或导航后需要重新允许。
 
 ### 清理宿主
 

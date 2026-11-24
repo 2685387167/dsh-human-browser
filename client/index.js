@@ -286,6 +286,7 @@ window.__ModuleLoader__.load({
                 case 'idle':
                 case 'downloading':
                 case 'installing':
+                case 'reloading':
                   updateProgress(progress)
                   break
                 default:
@@ -332,7 +333,7 @@ window.__ModuleLoader__.load({
                 label.textContent = `正在下载… ${percent}%`
                 bar.value = percent
               } else {
-                label.textContent = '正在安装…'
+                label.textContent = progress.stage === 'reloading' ? '正在等待扩展重连…' : '正在安装…'
                 bar.removeAttribute('value')
               }
             })
@@ -362,7 +363,7 @@ window.__ModuleLoader__.load({
 
             if (status.pendingReloadOnly) {
               view.show('等待浏览器自动重载扩展', [
-                node('p', '扩展文件已更新。请保持浏览器和扩展开发者模式开启，扩展会在下次自检时重载。'),
+                node('p', '扩展文件已更新。扩展会在启动或连接 DSH 时检查更新，也可以在浏览器的扩展管理页重新加载。'),
               ], null, dismiss)
               return
             }
