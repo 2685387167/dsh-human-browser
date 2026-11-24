@@ -85,6 +85,12 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 
 如需固定安装这次内测修订，安装地址使用 `github:2685387167/dsh-human-browser#plugin-v0.1.3`。历史 `v0.1.3` 标签保留给原扩展发布，附带的 Source code 对应当时的提交。
 
+已装过同版本时，重新执行下面的命令获取内测修订，再重启 DSH。
+
+```powershell
+dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.1.3'
+```
+
 从旧版升级后，重启 DSH 会同步更新本机 native host。若 `browser_status` 显示宿主注册失败，可以在插件目录运行 `node scripts/install.mjs --check` 检查注册，或运行 `node scripts/install.mjs` 手动修复。
 
 ### 2. Chrome 扩展
@@ -97,6 +103,13 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 扩展的每个版本都发布在 [Releases](https://github.com/2685387167/dsh-human-browser/releases) 上，旧版本保留。想用特定版本可以自己下载解压再用 `chrome://extensions` 加载。
 
 DSH 插件版本和 Chrome 扩展版本独立维护。插件读取线上 [扩展推荐](extension-version.json)，只接受与当前通信协议兼容的推荐；离线时使用本地已有的推荐。GitHub 的 Latest 标记只用于浏览发布页面。
+
+#### 内测验收
+
+- **首次安装**。在没有加载本扩展的 Windows 环境安装内测插件。点 DSH 弹窗的「下载并安装」后，确认弹窗保留解压路径。到 `chrome://extensions` 手动加载后，`browser_status` 应显示已连接、扩展版本 `0.1.3`、双方协议为 `1`。
+- **从旧扩展升级**。下载 [已发布的 0.1.2 扩展 ZIP](https://github.com/2685387167/dsh-human-browser/releases/download/v0.1.2/dsh-human-browser-extension-0.1.2.zip)，解压到可写目录并在测试 Chrome 配置中手动加载。运行内测插件，确认弹窗推荐 `0.1.3)，点击「更新」后弹窗会自动关闭。保持该 Chrome 配置运行和开发者模式开启，等待下一次版本自检，再用 `browser_status` 或扩展弹窗确认重连及版本。多配置运行时，`browser_status` 显示当前连接的扩展，可以只保留测试配置打开以便核对。
+- 点击「取消」会静默当前推荐版本 24 小时。首装和升级可以先测，再测试取消。
+- 本次回归报告里的 `0.1.4` 是隔离测试构造的版本，用于验证较新的扩展目录会被保留。公开的扩展 ZIP 是 `0.1.2` 和 `0.1.3`。
 
 ### 3. 授权
 
