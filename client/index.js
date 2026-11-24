@@ -15,7 +15,9 @@ window.__ModuleLoader__.load({
         padding: 24px;
         border: 1px solid var(--dsw-alias-border-l1, ButtonBorder);
         border-radius: var(--dsw-radius-panel, var(--dsw-radius-lg, 16px));
-        background: var(--dsw-alias-bg-layer-2, Canvas);
+        /* 主题浮层色可能半透明，叠在不透明底色上，避免背景内容透进对话框。 */
+        --hb-panel-tint: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-2, transparent));
+        background: linear-gradient(var(--hb-panel-tint), var(--hb-panel-tint)) Canvas;
         box-shadow: var(--dsw-elevation-prominent, var(--dsw-shadow-lv2, none));
         color: var(--dsw-alias-label-primary, CanvasText);
         font: inherit;
