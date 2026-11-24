@@ -1,7 +1,7 @@
 {
   "name": "dsh-human-browser",
   "version": "0.1.3",
-  "description": "DSH plugin: drive the Chrome you are already using — native messaging + chrome.debugger, real Input.* events, no CDP domains enabled, human-shaped pointer and typing. Windows only; the MV3 extension ships as a GitHub Release and is installed automatically.",
+  "description": "DSH plugin: drive the Chrome you are already using — native messaging + chrome.debugger, real Input.* events, no CDP domains enabled, human-shaped pointer and typing. Windows only; the plugin downloads the MV3 extension from GitHub Releases and guides first-time loading in Chrome.",
   "type": "module",
   "license": "MIT",
   "main": "index.js",

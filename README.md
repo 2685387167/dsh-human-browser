@@ -83,14 +83,14 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 
 装好后重启 DSH。插件会在加载时自动注册 native messaging host（写 HKCU 注册表，不需要管理员）。
 
-从旧版升级时，运行 `node scripts/install.mjs` 更新本机 native host，再重载 Chrome 扩展，让宿主可以转发扩展的协议版本。
+从旧版升级后，重启 DSH 会同步更新本机 native host。若 `browser_status` 显示宿主注册失败，可以在插件目录运行 `node scripts/install.mjs --check` 检查注册，或运行 `node scripts/install.mjs` 手动修复。
 
 ### 2. Chrome 扩展
 
 插件启动后会检测你 Chrome 里的扩展版本：
 
-- **没装过** → 弹窗提示「下载并安装」，点一下自动下载解压，然后按提示在 `chrome://extensions` 加载一次（Chrome 137+ 移除了 `--load-extension`，首次必须手动点三下）
-- **装过但版本低** → 弹窗提示「更新」，自动覆盖到 Chrome 记录的那个目录，扩展自己刷新，无需手动操作
+- **没装过** → 弹窗提示「下载并安装」，点一下自动下载解压，再到 `chrome://extensions` 打开「开发者模式」，选择「加载已解压的扩展程序」并选中提示的目录
+- **装过但版本低** → 弹窗提示「更新」，自动覆盖到 Chrome 记录的那个目录。保持开发者模式开启，扩展会在下一次版本自检时重载，通常在五分钟内
 
 扩展的每个版本都发布在 [Releases](https://github.com/2685387167/dsh-human-browser/releases) 上，旧版本保留。想用特定版本可以自己下载解压再用 `chrome://extensions` 加载。
 

@@ -26,6 +26,7 @@ import {
 } from './lib/protocol.js'
 import { ExtensionUpdater } from './lib/extension-updater.js'
 import { findExtensionInstallations } from './lib/chrome-profile.js'
+import { ensureNativeHost } from './scripts/install.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -314,6 +315,9 @@ export const TOOLS = [
       const lines = []
       lines.push(`插件：${b ? '已就绪' : '未就绪'}`)
       lines.push(`浏览器：${b?.connected ? '已连接' : '未连接'}${b?.lastError ? `（${b.lastError}）` : ''}`)
+      if (!b?.connected && lifecycle?.nativeHostError) {
+        lines.push(`本机宿主注册失败：${lifecycle.nativeHostError}`)
+      }
       const info = b?.hostInfo
       lines.push(`协议版本：扩展 ${info?.protocol ?? '未知'}，插件 ${PLUGIN_PROTOCOL}`)
       if (info?.protocolError) {
@@ -853,9 +857,29 @@ export const TOOLS = [
 export const name = 'human-browser'
 export const inject = ['tools']
 
+/** 注册失败时保留插件与更新路由，让诊断工具还能显示实际原因。 */
+function prepareNativeHost(owner, extensionId) {
+  if (process.platform !== 'win32') return
+  try {
+    const { registrations } = ensureNativeHost(extensionId)
+    const failures = registrations.filter(({ error }) => error)
+    if (!failures.length) {
+      log('本机 native messaging host 已就绪')
+      return
+    }
+    owner.nativeHostError = failures.map(({ label, error }) => `${label}：${error}`).join('；')
+  } catch (error) {
+    owner.nativeHostError = error.message
+  }
+  log(`本机宿主注册失败：${owner.nativeHostError}`)
+}
+
 export function apply(ctx) {
   lifecycle?.dispose()
-  const owner = { bridge: null, booting: null, retry: null, dispose: null, suspended: false, updater: null }
+  const owner = {
+    bridge: null, booting: null, retry: null, dispose: null,
+    suspended: false, updater: null, nativeHostError: null,
+  }
   lifecycle = owner
   pluginCtx = ctx
   log('浏览器插件开始加载')
@@ -891,6 +915,7 @@ export function apply(ctx) {
   try {
     const meta = readExtensionMeta()
     if (meta.extensionId) {
+      prepareNativeHost(owner, meta.extensionId)
       const updater = new ExtensionUpdater({
         extensionId: meta.extensionId,
         extensionVersionFile: path.join(__dirname, 'extension-version.json'),

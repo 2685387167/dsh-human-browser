@@ -44,10 +44,6 @@ const RUNTIME_DIR = path.join(HOST_DIR, 'runtime')
 const HOST_RUNTIME = path.join(RUNTIME_DIR, 'host', 'host.mjs')
 const LIB_RUNTIME = path.join(RUNTIME_DIR, 'lib', 'protocol.js')
 
-const args = process.argv.slice(2)
-const CHECK_ONLY = args.includes('--check')
-const nodeArg = args.includes('--node') ? args[args.indexOf('--node') + 1] : null
-
 const say = (s = '') => process.stdout.write(s + '\n')
 const ok = (s) => say(`  \x1b[32m✓\x1b[0m ${s}`)
 const warn = (s) => say(`  \x1b[33m!\x1b[0m ${s}`)
@@ -71,7 +67,7 @@ export function idFromPublicKey(derBuffer) {
  * 生成新 key 后必须把新 ID 同步写回 `extension-version.json` —— 否则运行时的更新检测
  * 会拿着旧 ID 去 Chrome 配置里找扩展，永远找不到，误判成"未安装"。
  */
-function ensureKey() {
+function ensureKey(checkOnly) {
   const metaFile = path.join(ROOT, 'extension-version.json')
   let meta = {}
   try {
@@ -93,7 +89,7 @@ function ensureKey() {
     const der = Buffer.from(manifest.key, 'base64')
     return { manifest, der, created: false, extId: idFromPublicKey(der) }
   }
-  if (CHECK_ONLY) {
+  if (checkOnly) {
     warn('扩展 manifest 里还没有 key（ID 会随目录路径变化）')
     return { manifest, der: null, created: false, extId: meta.extensionId || null }
   }
@@ -117,7 +113,8 @@ function ensureKey() {
 
 // ── 2. node 可执行文件 ──────────────────────────────────────────────────────
 
-function resolveNode() {
+/** 选择独立的 Node 可执行程序，桌面插件进程本身可能是 Electron。 */
+function resolveNode(nodeArg) {
   if (nodeArg) {
     if (!fs.existsSync(nodeArg)) throw new Error(`--node 指向的文件不存在：${nodeArg}`)
     return nodeArg
@@ -129,7 +126,7 @@ function resolveNode() {
   if (base === 'node.exe' || base === 'node') return process.execPath
 
   // DSH 自带运行时
-  const rt = path.join(os.homedir(), '.dsh', 'dsh-runtimes')
+  const rt = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'dsh-runtimes')
   try {
     for (const dir of fs.readdirSync(rt)) {
       const cand = path.join(rt, dir, 'dependencies', 'node', 'bin', 'node.exe')
@@ -150,11 +147,13 @@ function resolveNode() {
 // ── 3. 注册表 ───────────────────────────────────────────────────────────────
 
 function regSet(key, value) {
-  execFileSync('reg', ['add', key, '/ve', '/t', 'REG_SZ', '/d', value, '/f'], { windowsHide: true })
+  execFileSync('reg.exe', ['add', key, '/ve', '/t', 'REG_SZ', '/d', value, '/f'],
+    { windowsHide: true, stdio: 'pipe', timeout: 5000 })
 }
 function regQuery(key) {
   try {
-    const out = execFileSync('reg', ['query', key, '/ve'], { encoding: 'utf8', windowsHide: true })
+    const out = execFileSync('reg.exe', ['query', key, '/ve'],
+      { encoding: 'utf8', windowsHide: true, stdio: 'pipe', timeout: 5000 })
     const m = out.match(/REG_SZ\s+(.+)$/m)
     return m ? m[1].trim() : null
   } catch {
@@ -162,64 +161,88 @@ function regQuery(key) {
   }
 }
 
-// ── 主流程 ─────────────────────────────────────────────────────────────────
-
-say('\n\x1b[1mdsh-human-browser · 安装\x1b[0m\n')
-
-const { der, created, extId } = ensureKey()
-if (extId) {
-  ok(`扩展 ID：${extId}${created ? '（刚生成公钥）' : ''}`)
-
-  if (CHECK_ONLY) {
-    const cur = regQuery(HOST_REGISTRATIONS[0][1])
-    if (cur === NM_FILE) ok(`注册表已指向 ${NM_FILE}`)
-    else warn(`注册表未就绪（当前：${cur || '不存在'}）`)
-    say('\n（--check 模式，未做任何改动）\n')
-    process.exit(0)
+/** 内容改变时才替换文件，避免重启 DSH 时反复写入运行中的宿主。 */
+function writeIfChanged(file, contents) {
+  const bytes = Buffer.from(contents)
+  try {
+    if (fs.readFileSync(file).equals(bytes)) return
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
   }
-
-  const node = resolveNode()
-  ok(`node：${node}`)
-
-  fs.mkdirSync(HOST_DIR, { recursive: true })
-
-  // 把 host 与它依赖的 protocol.js 复制到纯 ASCII 路径，避免 cmd.exe 的 ANSI 解析把中文路径弄坏
-  fs.mkdirSync(path.join(RUNTIME_DIR, 'host'), { recursive: true })
-  fs.mkdirSync(path.join(RUNTIME_DIR, 'lib'), { recursive: true })
-  fs.copyFileSync(HOST_MJS, HOST_RUNTIME)
-  fs.copyFileSync(path.join(ROOT, 'lib', 'protocol.js'), LIB_RUNTIME)
-  ok(`host 运行时：${RUNTIME_DIR}`)
-
-  // host 启动器：Chrome 用 cmd.exe 跑这个 .cmd，命令行里只出现 ASCII
-  fs.writeFileSync(
-    HOST_CMD,
-    `@echo off\r\n"${node}" "${HOST_RUNTIME}" %*\r\n`,
-    'utf8',
-  )
-  ok(`host 启动器：${HOST_CMD}`)
-  if (/[^\x20-\x7e\r\n]/.test(fs.readFileSync(HOST_CMD, 'utf8'))) {
-    warn('警告：启动器里仍有非 ASCII 字符，cmd.exe 可能解析出错')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(temp, bytes)
+    fs.renameSync(temp, file)
+  } finally {
+    fs.rmSync(temp, { force: true })
   }
+}
 
-  // native messaging manifest
+/**
+ * 准备 Windows 用户级宿主，由插件启动和命令行安装器共用。
+ * @param {string} extensionId 已发布扩展的 ID，用于 native messaging 白名单
+ * @param {object} [options] 命令行安装器可指定独立的 Node 路径
+ */
+export function ensureNativeHost(extensionId, { nodeArg } = {}) {
+  if (!/^[a-p]{32}$/.test(extensionId)) throw new Error('扩展 ID 无效，无法注册浏览器宿主')
+  const node = resolveNode(nodeArg)
+  writeIfChanged(path.join(RUNTIME_DIR, 'package.json'), '{"type":"module"}\n')
+  writeIfChanged(LIB_RUNTIME, fs.readFileSync(path.join(ROOT, 'lib', 'protocol.js')))
+  writeIfChanged(HOST_RUNTIME, fs.readFileSync(HOST_MJS))
+  const launcher = `@echo off\r\n"${node}" "${HOST_RUNTIME}" %*\r\n`
+  writeIfChanged(HOST_CMD, launcher)
+
+  // 宿主文件准备好之后才登记，避免浏览器发现未写完的注册清单。
   const nm = {
     name: HOST_NAME,
     description: 'dsh-human-browser native host (Chrome to DSH plugin)',
     path: HOST_CMD,
     type: 'stdio',
-    allowed_origins: [`chrome-extension://${extId}/`],
+    allowed_origins: [`chrome-extension://${extensionId}/`],
   }
-  fs.writeFileSync(NM_FILE, JSON.stringify(nm, null, 2) + '\n', 'utf8')
-  ok(`native manifest：${NM_FILE}`)
-
-  // 注册表
-  for (const [label, key] of HOST_REGISTRATIONS) {
+  writeIfChanged(NM_FILE, JSON.stringify(nm, null, 2) + '\n')
+  const registrations = HOST_REGISTRATIONS.map(([label, key]) => {
     try {
-      regSet(key, NM_FILE)
-      ok(`注册 ${label}`)
+      if (regQuery(key) !== NM_FILE) regSet(key, NM_FILE)
+      return { label, error: null }
     } catch (e) {
-      warn(`注册 ${label} 失败：${e?.message?.split('\n')[0]}`)
+      return { label, error: e?.stderr?.toString().trim() || e.message }
     }
+  })
+  return { node, launcher, registrations }
+}
+
+/** 命令行保留 --check、--node 和开发目录的公钥初始化行为。 */
+function main() {
+  const args = process.argv.slice(2)
+  const checkOnly = args.includes('--check')
+  const nodeArg = args.includes('--node') ? args[args.indexOf('--node') + 1] : null
+  say('\n\x1b[1mdsh-human-browser · 安装\x1b[0m\n')
+  const { created, extId } = ensureKey(checkOnly)
+  if (!extId) {
+    bad('没有公钥，无法确定扩展 ID')
+    process.exitCode = 1
+    return
+  }
+  ok(`扩展 ID：${extId}${created ? '（刚生成公钥）' : ''}`)
+  if (checkOnly) {
+    const cur = regQuery(HOST_REGISTRATIONS[0][1])
+    if (cur === NM_FILE) ok(`注册表已指向 ${NM_FILE}`)
+    else warn(`注册表未就绪（当前：${cur || '不存在'}）`)
+    say('\n（--check 模式，未做任何改动）\n')
+    return
+  }
+
+  const { node, launcher, registrations } = ensureNativeHost(extId, { nodeArg })
+  ok(`node：${node}`)
+  ok(`host 运行时：${RUNTIME_DIR}`)
+  ok(`host 启动器：${HOST_CMD}`)
+  if (/[^\x20-\x7e\r\n]/.test(launcher)) warn('警告：启动器里仍有非 ASCII 字符，cmd.exe 可能解析出错')
+  ok(`native manifest：${NM_FILE}`)
+  for (const { label, error } of registrations) {
+    if (error) warn(`注册 ${label} 失败：${error}`)
+    else ok(`注册 ${label}`)
   }
 
   say('\n\x1b[1m启用扩展\x1b[0m')
@@ -235,7 +258,8 @@ if (extId) {
   }
   say(`  4. 重载 DSH bundle，在扩展弹窗查看连接状态并授权测试标签页。`)
   say('')
-} else {
-  bad('没有公钥，无法确定扩展 ID')
-  process.exit(1)
 }
+
+// pnpm 的包入口可能经过链接，比较真实路径，保证直接执行时才运行 CLI。
+const invoked = process.argv[1]
+if (invoked && fs.existsSync(invoked) && fs.realpathSync(invoked) === fileURLToPath(import.meta.url)) main()
