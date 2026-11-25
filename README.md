@@ -2,7 +2,7 @@
 
 让 AI 在**你正在用的那个 Chrome** 里干活，并且尽量看不出是机器在动。
 
-不是另开一个浏览器，是接管你已经登录、有历史、装了扩展的那个窗口。
+插件使用你已经连接的 Chrome 配置，可以接管现有窗口，也可以新开普通窗口或无痕窗口。
 
 > 仅 Windows · 需要 Chrome 或 Edge 116+ · 扩展从 GitHub Releases 下载，首次需手动加载
 
@@ -44,7 +44,7 @@
 | 工具 | 干什么 |
 |---|---|
 | `browser_status` | 连接状态、已授权标签页、扩展版本及协议版本 |
-| `browser_tabs` | 列 / 开 / 关 / 切标签页 |
+| `browser_tabs` | 列出、绑定、打开、关闭或切换标签页，支持新窗口和无痕窗口 |
 | `browser_snapshot` | 读可交互元素清单，每个带完整 ref 和人类可读标签 |
 | `browser_read` | 读正文 / HTML / 元素属性 / 页面元信息 |
 | `browser_click` | 点击元素或坐标 —— 真实鼠标事件 + 轨迹 + 随机落点 |
@@ -61,7 +61,11 @@
 
 15 个工具的 schema 合计约 7500 字节（≈1900 tokens），是每次请求都要付的固定成本。
 
-启用插件后，需要在现有 Chrome 中打开网页、点击、输入或截图时，DSH 默认优先使用 `browser_*`。首次操作或连接状态不明时会检查连接，遇到断线、未授权或能力限制时会说明情况。只查询公开资料时仍可直接使用网页搜索或抓取。
+启用插件后，需要在 Chrome 中打开网页、点击、输入或截图时，DSH 默认优先使用 `browser_*`。连接状态不明时会检查连接，遇到断线、未授权或能力限制时会说明情况。只查询公开资料时仍可直接使用网页搜索或抓取。
+
+需要操作现有网页时，用 `browser_tabs list` 找到目标，再用 `browser_tabs bind` 绑定其标签页 ID。用 `browser_tabs open` 打开页面时会自动绑定本聊天。默认使用已绑定的窗口和标签页。切换焦点、打开另一个 Chrome 窗口都不会改变绑定。原目标关闭、移到另一窗口或浏览器重连后，可用 `list` 加 `all: true` 重新选择并绑定。
+
+用 `browser_tabs open` 的 `window: "new"` 新建普通窗口。无痕访问用 `window: "incognito"`，会先在现有无痕窗口里开新标签页，没有可用窗口时创建。明确要求新建无痕窗口时用 `window: "newIncognito"`。无痕访问要求在 `chrome://extensions` 的扩展详情中开启「在无痕模式下启用」，开页后沿用现有网页授权和脚本执行权限。
 
 ---
 
@@ -75,10 +79,10 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 
 装好后重启 DSH。插件会在加载时自动注册 native messaging host（写 HKCU 注册表，不需要管理员）。
 
-如需固定安装 DSH 插件 0.1.5，使用下面的命令。配套的 Chrome 扩展资产见 [Chrome 扩展 0.1.4](https://github.com/2685387167/dsh-human-browser/releases/tag/extension-v0.1.4)。
+如需固定安装 DSH 插件 0.1.6，使用下面的命令。配套的 Chrome 扩展资产见 [Chrome 扩展 0.1.5](https://github.com/2685387167/dsh-human-browser/releases/tag/extension-v0.1.5)。
 
 ```powershell
-dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.1.5'
+dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.1.6'
 ```
 
 从旧版升级后，重启 DSH 会同步更新本机 native host。若 `browser_status` 显示宿主注册失败，可以在插件目录运行 `node scripts/install.mjs --check` 检查注册，或运行 `node scripts/install.mjs` 手动修复。
@@ -88,11 +92,11 @@ dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.
 插件启动后会检测你 Chrome 里的扩展版本：
 
 - **首次安装** → 在提示中点「下载并安装」。解压完成后，打开 `chrome://extensions`，开启「开发者模式」，点「加载已解压的扩展程序」，选择提示中的目录。
-- **升级扩展** → 在提示中点「更新」，插件会更新可验证的旧版解压目录，并通知已连接且支持主动重载的扩展。首次从 0.1.3 升到 0.1.4 时，可等待旧版扩展自检。升级后仍等待重载时，可在 `chrome://extensions` 点击「重新加载」。
+- **升级扩展** → 在提示中点一次「更新」。下载并校验完成后，插件会自动更新旧版解压目录，每个共享目录写入一次，再通知已连接且支持主动重载的扩展。首次从 0.1.3 升到 0.1.4 时，可等待旧版扩展自检。升级后仍等待重载时，可在 `chrome://extensions` 点击「重新加载」。
 
 扩展的每个版本都发布在 [Releases](https://github.com/2685387167/dsh-human-browser/releases) 上，旧版本保留。想用特定版本可以自己下载解压再用 `chrome://extensions` 加载。
 
-DSH 插件版本和 Chrome 扩展版本独立维护。每个 DSH 插件通过随包 [适配配置](extension-version.json) 指定一个扩展版本。检查时只有查到本机扩展低于该版本才提示更新，点「更新」后下载配置指定的 ZIP。已达到适配版本或用了更高版本时，可继续使用当前扩展。
+DSH 插件版本和 Chrome 扩展版本独立维护。每个 DSH 插件通过随包 [适配配置](extension-version.json) 指定一个扩展版本。启动时，只有已启用、目录可以核验且版本低于适配版本的解压扩展才会触发更新提示。禁用扩展或失效目录的旧记录会被跳过。等待重连的提示随实际扩展更新进度显示。
 
 更新弹窗中的「取消」只关闭本次 DSH 启动的提示，重启后可再次提示。左下角的「忽略本次更新」会记住本次适配版本，之后按新适配版本重新判断。
 

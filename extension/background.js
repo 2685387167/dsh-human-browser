@@ -395,6 +395,9 @@ chrome.tabs.onCreated.addListener((tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void authorizationReady.then(() => forgetTab(tabId))
 })
+chrome.tabs.onDetached?.addListener((tabId) => {
+  abortOperations('标签页已移到其他窗口，请重新绑定', (op) => op.tabId === tabId)
+})
 chrome.tabs.onReplaced.addListener((tabId, previousId) => {
   void authorizationReady.then(async () => {
     // Chrome 预渲染替换标签页时，保留旧标签页已经作出的逐来源决定。
@@ -778,6 +781,19 @@ async function startInput(tabId, op) {
 
 // ── 请求分发 ────────────────────────────────────────────────────────────────
 
+/** 核对目标窗口及无痕属性，避免窗口变动后操作落到其他上下文。 */
+function confirmTabWindow(tab, windowId, incognito) {
+  if (tab?.id == null || (windowId != null && tab.windowId !== windowId) ||
+      (typeof incognito === 'boolean' && tab.incognito !== incognito)) {
+    throw new Error('标签页所在窗口已变化或无法确认，请重新绑定')
+  }
+}
+
+/** 无痕权限由 Chrome 管理，每次开无痕窗口前读取实时设置。 */
+async function incognitoAllowed() {
+  return await chrome.extension?.isAllowedIncognitoAccess?.() === true
+}
+
 const METHODS = {
   /** 只接受 DSH 指明且本目录已经写好的目标版本。 */
   async reloadExtension({ version }, op) {
@@ -794,6 +810,8 @@ const METHODS = {
       protocol: PROTOCOL,
       globalAuthorization,
       globalScriptExecution,
+      supportsWindowOpen: true,
+      incognitoAllowed: await incognitoAllowed(),
       attached: [...attached],
       authorized: [...grants.keys()],
       tabCount: tabs.length,
@@ -801,9 +819,12 @@ const METHODS = {
     }
   },
 
-  async tabs({ all }) {
-    const list = await chrome.tabs.query(all ? {} : { lastFocusedWindow: true })
-    const [front] = all ? await chrome.tabs.query({ active: true, lastFocusedWindow: true }) : list.filter((t) => t.active)
+  async tabs({ all, windowId, tabId, details = true }) {
+    const query = windowId != null ? { windowId } : all ? {} : { lastFocusedWindow: true }
+    const list = tabId == null ? await chrome.tabs.query(query) : [await chrome.tabs.get(tabId)]
+    const [front] = all && windowId == null && tabId == null
+      ? await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+      : list.filter((tab) => tab.active)
     return list
       .filter((t) => t.id != null)
       .map((t) => {
@@ -811,10 +832,11 @@ const METHODS = {
         const authorized = grantMatchesTab(grant, t)
         return {
           id: t.id,
-          title: authorized ? (t.title || '').slice(0, 90) : '',
-          url: authorized ? (t.url || '').slice(0, 180) : '',
+          title: details && authorized ? (t.title || '').slice(0, 90) : '',
+          url: details && authorized ? (t.url || '').slice(0, 180) : '',
           authorized,
           windowId: t.windowId,
+          incognito: t.incognito === true,
           attached: attached.has(t.id),
           mine: t.id === front?.id,
         }
@@ -832,7 +854,47 @@ const METHODS = {
   async open({ url, background }) {
     if (!httpOrigin(url)) throw new Error('只允许打开 HTTP 或 HTTPS 网址')
     const tab = await chrome.tabs.create({ url, active: !background })
-    return { tabId: tab?.id ?? null, url, globalAuthorization }
+    return { tabId: tab?.id ?? null, windowId: tab?.windowId, incognito: tab?.incognito === true, url, globalAuthorization }
+  },
+
+  /** 先选定并校验窗口，再向已核验的标签页发送目标网址。 */
+  async openWindow({ url, background, mode, windowId, incognito }, op) {
+    if (url !== undefined && !httpOrigin(url)) throw new Error('只允许打开 HTTP 或 HTTPS 网址')
+    if (!['current', 'new', 'incognito', 'newIncognito'].includes(mode)) throw new Error('不支持此开窗方式')
+    if (mode === 'current' && (!Number.isInteger(windowId) || typeof incognito !== 'boolean')) {
+      throw new Error('请重新绑定需要使用的窗口')
+    }
+    const privateWindow = mode === 'current' ? incognito : mode === 'incognito' || mode === 'newIncognito'
+    if (privateWindow && !(await incognitoAllowed())) {
+      throw new Error('请在 Chrome 扩展详情里开启「在无痕模式下启用」')
+    }
+
+    let window
+    if (mode === 'current') {
+      window = await chrome.windows.get(windowId)
+      if (!window || window.id !== windowId) throw new Error('绑定的窗口已关闭，请重新绑定')
+    } else if (mode === 'incognito') {
+      const windows = await chrome.windows.getAll({ windowTypes: ['normal'] })
+      const candidates = windows.filter((item) => item.incognito && Number.isInteger(item.id))
+      window = candidates.find((item) => item.focused) ?? candidates[0]
+    }
+
+    op.check()
+    const reused = Boolean(window)
+    if (!window) window = await chrome.windows.create({ type: 'normal', incognito: privateWindow, focused: !background })
+    if (!Number.isInteger(window?.id) || window.incognito !== privateWindow) {
+      throw new Error('Chrome 返回的窗口类型不符，未加载目标网址')
+    }
+
+    op.check()
+    const tab = reused
+      ? await chrome.tabs.create({ windowId: window.id, active: !background })
+      : (await chrome.tabs.query({ windowId: window.id, active: true }))[0]
+    confirmTabWindow(tab, window.id, window.incognito)
+    op.check()
+    if (url !== undefined) await chrome.tabs.update(tab.id, { url })
+    if (reused && !background) await chrome.windows.update(window.id, { focused: true })
+    return { tabId: tab.id, windowId: window.id, incognito: window.incognito, url, reused, globalAuthorization }
   },
 
   async close({ tabId }) {
@@ -1134,8 +1196,8 @@ const METHODS = {
 }
 
 /** 页面状态或输入有先后关系的请求，在同一标签页上依次执行。 */
-const serializedMethods = new Set(['activate', 'close', 'snapshot', 'elementBox', 'click', 'hover', 'type', 'key', 'scroll', 'screenshot', 'evaluate'])
-const globalMethods = new Set(['status', 'tabs', 'open', 'detach', 'reloadExtension'])
+const serializedMethods = new Set(['openWindow', 'activate', 'close', 'snapshot', 'elementBox', 'click', 'hover', 'type', 'key', 'scroll', 'screenshot', 'evaluate'])
+const globalMethods = new Set(['status', 'tabs', 'open', 'openWindow', 'detach', 'reloadExtension'])
 
 async function handleRequest(msg, nativePort) {
   const { id, method } = msg
@@ -1164,7 +1226,10 @@ async function handleRequest(msg, nativePort) {
     const run = async () => {
       await authorizationReady
       op.check()
-      if (!global) await authorizedTab(tabId)
+      if (!global) {
+        const { tab } = await authorizedTab(tabId)
+        confirmTabWindow(tab, params.targetWindowId, params.targetIncognito)
+      }
       op.check()
       return METHODS[method](params, op)
     }

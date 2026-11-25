@@ -157,18 +157,6 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    /** 按 Chrome 扩展版本的数字分段计数，避免把 0.1.10 算作早于 0.1.3。 */
-    function isOlder(version, targetVersion) {
-      if (!version) return false
-      const current = version.split('.').map(Number)
-      const target = targetVersion.split('.').map(Number)
-      for (let index = 0; index < Math.max(current.length, target.length); index++) {
-        const difference = (current[index] ?? 0) - (target[index] ?? 0)
-        if (difference !== 0) return difference < 0
-      }
-      return false
-    }
-
     /** 创建纯文本节点，保留发行说明和宿主错误原文，避免把外部数据解析成 HTML。 */
     function node(tag, text, className) {
       const element = document.createElement(tag)
@@ -341,7 +329,7 @@ window.__ModuleLoader__.load({
             node('p', '已开始的安装会在后台继续。', 'hb-secondary'),
           ], null, dismiss)
           try {
-            const result = await request('install', signal, {})
+            const result = await request('install', signal, { updateOnly: status.installed })
             if (signal.aborted) return
             if (result.started !== true && result.reason !== 'already-running') {
               throw new Error(result.error || '宿主未确认启动扩展安装')
@@ -371,7 +359,8 @@ window.__ModuleLoader__.load({
               throw new Error('宿主缺少扩展版本状态')
             }
             if (current.dismissedForSession || current.ignoredUpdate) return
-            if (current.installed && !current.needsUpdate && !current.pendingReloadOnly) return
+            // Chrome 保存的旧版本记录只用于诊断。重连提示由实际安装任务的进度驱动。
+            if (current.installed && !current.needsUpdate) return
             status = current
             if (!status.installed) {
               view.show('需要一个浏览器扩展', [
@@ -381,17 +370,10 @@ window.__ModuleLoader__.load({
               return
             }
 
-            if (status.pendingReloadOnly) {
-              view.show('等待浏览器自动重载扩展', [
-                node('p', '扩展文件已更新。扩展会在启动或连接 DSH 时检查更新，也可以在浏览器的扩展管理页重新加载。'),
-              ], null, dismiss)
-              return
-            }
-
             const title = `扩展可更新至 ${status.targetVersion}`
             const children = [node('p', `当前 ${status.userVersion ?? '未知'}，插件适配 ${status.targetVersion}`, 'hb-secondary')]
             const profiles = status.profiles ?? []
-            const outdated = profiles.filter((profile) => isOlder(profile.version, status.targetVersion)).length
+            const outdated = profiles.filter((profile) => profile.needsUpdate).length
             if (profiles.length > 1 && outdated > 0) {
               children.push(node('p', `有 ${outdated} 个配置的扩展低于插件适配版本。`, 'hb-secondary'))
             }

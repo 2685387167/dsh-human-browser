@@ -1,9 +1,9 @@
 {
   "extensionId": "chmijdopmnaaobpmpcibbegndonlgmic",
-  "extensionVersion": "0.1.4",
-  "extensionTag": "extension-v0.1.4",
+  "extensionVersion": "0.1.5",
+  "extensionTag": "extension-v0.1.5",
   "protocol": 1,
   "repository": "2685387167/dsh-human-browser",
-  "releaseNotes": "· 新增「全局授权」。启用后可自动授权首次加载的 HTTP(S) 网页，支持逐标签页撤销。\n· 新增「全局脚本执行权限」。仅对已授权网页生效，刷新后继续应用全局设置，支持逐页禁用。\n· 支持 DSH 通知后主动重载。启动与重连时补查磁盘版本。",
-  "sha256": "5efadc6986fb9a2b3ce70fbd7f7ee4b50d8d2a070f579e5cde756816ce808832"
+  "releaseNotes": "· 支持新建普通窗口和无痕窗口。无痕访问优先在现有无痕窗口中打开新标签页。\n· 校验窗口类型后才加载目标网址。无痕访问使用 Chrome 现有的无痕权限。\n· 窗口或标签页变化时校验操作目标，网页授权和脚本执行权限沿用现有规则。",
+  "sha256": "d07de5e7d420f021b0f3ab90e1591b1a03e8ca67dcc12e90ac1f29e37d9108f8"
 }

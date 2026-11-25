@@ -231,17 +231,80 @@ function rngNow() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function resolveTab(explicit) {
-  if (explicit != null) {
-    if (!Number.isInteger(explicit) || explicit < 0) throw new Error('tab 必须是有效的标签页 ID')
-    return explicit
-  }
-  const b = needBridge()
-  const tabs = await b.request('tabs', {})
-  const active = tabs.find((t) => t.mine)
-  if (!active) throw new Error('没找到活动标签页，先在 Chrome 里打开一个页面')
+/** DSH 调用上下文提供聊天 ID。无聊天上下文的调用必须提供明确目标。 */
+function callingSessionId(exec) {
+  const id = exec?.agent?.session?.id
+  return typeof id === 'string' && id ? id : undefined
+}
 
-  return active.id
+/** 每个操作只使用开始时的浏览器连接；标签页 ID 可能在另一条连接中重用。 */
+function captureBrowser() {
+  const bridge = needBridge()
+  const peer = bridge.hostInfo
+  const check = () => {
+    if (lifecycle?.bridge !== bridge || !bridge.connected || bridge.hostInfo !== peer) {
+      throw new Error('浏览器连接已变化，请重新选择并绑定目标')
+    }
+  }
+  return {
+    peer, check,
+    request(method, params, timeout) {
+      check()
+      return bridge.request(method, params, timeout)
+    },
+  }
+}
+
+/** 确认绑定属于当前连接，避免重连后复用其他浏览器的窗口或标签页。 */
+function boundTarget(browser, exec) {
+  const target = lifecycle?.targets.get(callingSessionId(exec))
+  if (target && target.peer !== browser.peer) throw new Error('绑定的浏览器已重连，请重新绑定目标')
+  return target
+}
+
+/** 查询目标身份；旧扩展也可从列表按精确 ID 匹配。 */
+async function findTabTarget(browser, tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0) throw new Error('tab 必须是有效的标签页 ID')
+  const tabs = await browser.request('tabs', { all: true, tabId, details: false }, 8000)
+  const target = tabs.find((tab) => tab.id === tabId)
+  if (!Number.isInteger(target?.windowId)) throw new Error('找不到指定标签页，请重新绑定目标')
+  return target
+}
+
+/** 只在所属聊天内保存明确选择的目标，开窗与激活可显式换绑。 */
+function rememberTarget(browser, exec, target) {
+  browser.check()
+  const sessionId = callingSessionId(exec)
+  if (sessionId) lifecycle.targets.set(sessionId, {
+    peer: browser.peer, id: target.id, windowId: target.windowId, incognito: target.incognito,
+  })
+}
+
+/** 默认页签固定。指定同窗口的其他页签时，本次请求使用该页签。 */
+async function resolveTarget(explicit, exec) {
+  const browser = captureBrowser()
+  const initial = boundTarget(browser, exec)
+  const tabId = explicit ?? initial?.id
+  if (tabId == null) throw new Error('请先用 browser_tabs 绑定目标，或显式提供 tab')
+  const target = await findTabTarget(browser, tabId)
+  browser.check()
+  const bound = boundTarget(browser, exec)
+  if (initial && bound !== initial) throw new Error('聊天的绑定已变化，请重新确认目标')
+  if (bound && (target.windowId !== bound.windowId ||
+      (typeof bound.incognito === 'boolean' && target.incognito !== bound.incognito))) {
+    throw new Error('目标不在已绑定的窗口，请先用 browser_tabs bind 重新绑定')
+  }
+  if (!bound) rememberTarget(browser, exec, target)
+  const selected = boundTarget(browser, exec)
+  return {
+    tabId,
+    request(method, params, timeout) {
+      if (boundTarget(browser, exec) !== selected) throw new Error('聊天的绑定已变化，请重新确认目标')
+      return browser.request(method, {
+        ...params, tabId, targetWindowId: target.windowId, targetIncognito: target.incognito,
+      }, timeout)
+    },
+  }
 }
 
 function fmtBox(b) {
@@ -254,20 +317,19 @@ function short(s, n = 60) {
 }
 
 /** 人类化点击计划：算轨迹 + 落点，全部下发，扩展只管播放 */
-async function planClick(tabId, { ref, x, y, pacing }) {
-  const b = needBridge()
+async function planClick(browser, { ref, x, y, pacing }) {
   const profile = resolveProfile(pacing)
   const rng = rngNow()
 
   let box = null
   if (ref !== undefined && ref !== null) {
-    box = await b.request('elementBox', { tabId, ref }, 12000)
+    box = await browser.request('elementBox', { ref }, 12000)
   }
   const target = box
     ? pickPoint(box, profile, rng)
     : { x: Math.round(Number(x) || 0), y: Math.round(Number(y) || 0) }
 
-  const mouse = await b.request('mouse', { tabId }, 6000).catch(() => ({ at: null }))
+  const mouse = await browser.request('mouse', {}, 6000).catch(() => ({ at: null }))
   // 起点：上次位置；没有就从目标左上方一段距离起步（真人不会凭空出现）
   const from = mouse?.at || {
     x: Math.round(target.x - 90 - rng() * 140),
@@ -304,7 +366,7 @@ export const TOOLS = [
       '查看用户正在用的 Chrome 的扩展连接、网页授权和快照状态。需要操作浏览器时优先使用 browser_*；首次使用或连接状态不明时先调用此工具。',
     parameters: {},
     output: textOutput,
-    async execute() {
+    async execute(_args, exec) {
       let b = null
       try {
         b = await boot()
@@ -325,8 +387,11 @@ export const TOOLS = [
         return { text: lines.join('\n') }
       }
       if (b?.connected) {
-        const s = await b.request('status', {}, 8000)
+        const browser = captureBrowser()
+        const s = await browser.request('status', {}, 8000)
         lines.push(`扩展版本：${s.version}`)
+        lines.push(`窗口操作：${s.supportsWindowOpen ? '可用' : '需更新扩展'}`)
+        if (typeof s.incognitoAllowed === 'boolean') lines.push(`Chrome 无痕权限：${s.incognitoAllowed ? '已允许' : '未允许'}`)
         if (typeof s.globalAuthorization === 'boolean') {
           lines.push(`全局授权：${s.globalAuthorization ? '开启' : '关闭'}`)
         }
@@ -338,9 +403,9 @@ export const TOOLS = [
         if (s.snaps.length) {
           lines.push(`快照：${s.snaps.map((x) => `tab ${x.tabId}（${x.count} 个元素，${Math.round(x.ageMs / 1000)}s 前）`).join('；')}`)
         }
-        const tabs = await b.request('tabs', {}, 8000)
-        const mine = tabs.find((t) => t.mine)
-        if (mine) lines.push(`当前页：${mine.authorized ? `${short(mine.title, 50)} — ${short(mine.url, 80)}` : `tab ${mine.id}（请在扩展弹窗授权）`}`)
+        const bound = lifecycle?.targets.get(callingSessionId(exec))
+        if (bound?.peer === browser.peer) lines.push(`绑定目标：窗口 ${bound.windowId}，标签页 ${bound.id}`)
+        else if (bound) lines.push('已绑定的浏览器连接发生变化，请重新绑定')
       } else {
         lines.push('')
         lines.push('连不上时按这个顺序查：')
@@ -367,47 +432,73 @@ export const TOOLS = [
 
   defineTool({
     name: 'browser_tabs',
-    description: '列出、打开、关闭或切换用户现有 Chrome 的标签页。open 在现有窗口打开标签页，无法创建新窗口或无痕窗口。* 标记当前活动标签页。',
+    description: '列出、打开、绑定或关闭 Chrome 标签页。open 可在绑定窗口开页、新建普通窗口或使用无痕窗口。',
     parameters: {
-      action: { type: 'string', required: true, enum: ['list', 'open', 'close', 'activate'], description: 'list=列出，open=打开新标签页，close=关闭，activate=切过去' },
-      tab: { type: 'integer', description: '标签页 id（close / activate 用）' },
-      url: { type: 'string', description: 'open 时要打开的网址' },
-      background: { type: 'boolean', description: 'open 时是否后台打开（默认 false，会切前台）' },
+      action: { type: 'string', required: true, enum: ['list', 'open', 'bind', 'close', 'activate'], description: 'list=列出，open=打开并绑定，bind=仅绑定，close=关闭，activate=切换并绑定' },
+      tab: { type: 'integer', description: 'bind、close、activate 使用的标签页 ID' },
+      url: { type: 'string', description: 'open 要访问的 HTTP(S) 网址，新窗口可留空' },
+      window: { type: 'string', enum: ['current', 'new', 'incognito', 'newIncognito'], description: 'open 的窗口选择，依次为绑定或当前窗口、普通新窗口、优先复用无痕、强制新建无痕' },
+      all: { type: 'boolean', description: 'list 时显式列出所有可见窗口，默认只列绑定或当前窗口' },
+      background: { type: 'boolean', description: 'open 时是否后台打开，默认 false' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
+    async execute(args, exec) {
+      const browser = captureBrowser()
       if (args.action === 'list') {
-        const tabs = await b.request('tabs', { all: false }, 8000)
+        const bound = args.all ? null : boundTarget(browser, exec)
+        const tabs = (await browser.request('tabs', { all: Boolean(args.all || bound), windowId: bound?.windowId }, 8000))
+          .filter((tab) => !bound || tab.windowId === bound.windowId)
         if (!tabs.length) return { text: '（这个窗口没有标签页）' }
         const lines = tabs.map(
           (t) =>
-            `${t.mine ? '*' : ' '} ${String(t.id).padStart(5)}  ${t.authorized ? `${t.attached ? '🔗 ' : ''}${short(t.title, 48)} — ${short(t.url, 76)}` : '（未授权）'}`,
+            `${t.mine ? '*' : ' '} ${String(t.id).padStart(5)}  窗口 ${t.windowId}${t.incognito ? '（无痕）' : ''} ${t.id === bound?.id ? '已绑定 ' : ''}${t.authorized ? `${t.attached ? '🔗 ' : ''}${short(t.title, 48)} — ${short(t.url, 76)}` : '（未授权）'}`,
         )
-        return { text: `${lines.join('\n')}\n（* = 用户正在看；🔗 = 已被接管）` }
+        return { text: `${lines.join('\n')}\n（* = 活动标签页；🔗 = 已被接管）` }
       }
       if (args.action === 'open') {
-        if (!args.url) throw new Error('open 需要 url')
-        const r = await b.request('open', { url: args.url, background: !!args.background }, 30000)
+        const mode = args.window ?? 'current'
+        if (!['current', 'new', 'incognito', 'newIncognito'].includes(mode)) throw new Error('不支持此开窗方式')
+        if (mode === 'current' && !args.url) throw new Error('在当前窗口开页需要 url')
+        const bound = mode === 'current' ? boundTarget(browser, exec) : null
+        const openArgs = { url: args.url, background: !!args.background }
+        let r
+        if (mode === 'current' && !bound) {
+          r = await browser.request('open', openArgs, 30000)
+        } else {
+          try {
+            r = await browser.request('openWindow', { ...openArgs, mode, windowId: bound?.windowId, incognito: bound?.incognito }, 30000)
+          } catch (error) {
+            if (/未知方法.*openWindow/.test(error.message)) throw new Error('当前 Chrome 扩展不支持指定窗口开页，请更新扩展')
+            throw error
+          }
+        }
+        const target = Number.isInteger(r.windowId)
+          ? { id: r.tabId, windowId: r.windowId, incognito: r.incognito }
+          : await findTabTarget(browser, r.tabId)
+        if (!Number.isInteger(target.id)) throw new Error('Chrome 未返回有效的标签页 ID')
+        rememberTarget(browser, exec, target)
 
         const grantHint = r.globalAuthorization
           ? '全局授权已开启。页面加载后可用 browser_tabs 查看授权状态。'
           : '请在 Chrome 扩展弹窗授权此页后继续。'
-        return { text: `已打开标签页 ${r.tabId}：${r.url}${args.background ? '（后台）' : ''}。${grantHint}` }
+        const windowHint = r.reused === false ? '已新建' : '已在'
+        return { text: `${windowHint}窗口 ${target.windowId}${target.incognito ? '（无痕）' : ''}打开标签页 ${target.id}${r.url ? `，${r.url}` : ''}。${grantHint}` }
       }
       if (args.action === 'close') {
         if (args.tab == null) throw new Error('close 需要 tab')
-        await b.request('close', { tabId: Number(args.tab) }, 10000)
+        const target = await resolveTarget(args.tab, exec)
+        await target.request('close', {}, 10000)
 
 
         return { text: `已关闭标签页 ${args.tab}` }
       }
-      if (args.action === 'activate') {
-        if (args.tab == null) throw new Error('activate 需要 tab')
-        await b.request('activate', { tabId: Number(args.tab) }, 10000)
-
-
-        return { text: `已切到标签页 ${args.tab}` }
+      if (args.action === 'activate' || args.action === 'bind') {
+        const target = await findTabTarget(browser, args.tab)
+        if (args.action === 'activate') {
+          await browser.request('activate', { tabId: target.id, targetWindowId: target.windowId, targetIncognito: target.incognito }, 10000)
+        }
+        rememberTarget(browser, exec, target)
+        return { text: `已选择窗口 ${target.windowId}${target.incognito ? '（无痕）' : ''}的标签页 ${target.id}${target.authorized ? '' : '（未授权）'}` }
       }
       throw new Error(`不认识的 action：${args.action}`)
     },
@@ -419,18 +510,18 @@ export const TOOLS = [
       '读当前页面的**可交互元素**清单，每个元素带完整 ref 和可读标签。点击/输入原样传入 ref。' +
       '确认目标标签页后先快照再操作；页面变了（跳转、弹窗、列表刷新）要重新快照。',
     parameters: {
-      tab: { type: 'integer', description: '标签页 id，省略就用当前页' },
+      tab: { type: 'integer', description: '标签页 ID，省略使用本聊天绑定的标签页' },
       max: { type: 'integer', description: '最多列多少个元素，默认 260' },
       includeOffscreen: { type: 'boolean', description: '是否连视口外的元素一起列（默认 false，只列看得见的）' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
+      const { tabId } = b
 
       const snap = await b.request(
         'snapshot',
-        { tabId, max: args.max || 260, includeOffscreen: !!args.includeOffscreen },
+        { max: args.max || 260, includeOffscreen: !!args.includeOffscreen },
         30000,
       )
 
@@ -482,15 +573,14 @@ export const TOOLS = [
       what: { type: 'string', required: true, enum: ['text', 'html', 'attr', 'info'], description: '读什么' },
       selector: { type: 'string', description: 'CSS 选择器。attr 必须指定，text/html 省略时读整页' },
       maxChars: { type: 'integer', description: 'text/html 最多返回多少字符，默认 20000' },
-      tab: { type: 'integer', description: '标签页 id，省略用当前页' },
+      tab: { type: 'integer', description: '标签页 ID，省略使用本聊天绑定的标签页' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
       const r = await b.request(
         'read',
-        { tabId, what: args.what, selector: args.selector, maxChars: args.maxChars },
+        { what: args.what, selector: args.selector, maxChars: args.maxChars },
         30000,
       )
       if (args.what === 'text') {
@@ -528,12 +618,11 @@ export const TOOLS = [
       x: { type: 'integer', description: '直接用坐标点击时的 x（CSS px，视口坐标）' },
       y: { type: 'integer', description: '直接用坐标点击时的 y' },
       pacing: { type: 'string', enum: ['cautious', 'normal', 'fast'], description: '节奏档位：强风控站用 cautious，自己家的后台用 fast，默认 normal' },
-      tab: { type: 'integer', description: '标签页 id，省略用当前页' },
+      tab: { type: 'integer', description: '标签页 ID，省略使用本聊天绑定的标签页' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
       const hasRef = args.ref !== undefined && args.ref !== null
       if (!hasRef && (!Number.isInteger(args.x) || !Number.isInteger(args.y) || args.x < 0 || args.y < 0)) {
         throw new Error('请提供 ref 或一组非负整数坐标 x 和 y')
@@ -541,8 +630,8 @@ export const TOOLS = [
 
       await sleep(thinkPause(resolveProfile(args.pacing), rngNow()))
 
-      const { plan, box, target } = await planClick(tabId, { ref: args.ref, x: args.x, y: args.y, pacing: args.pacing })
-      await b.request('click', { tabId, plan, ref: args.ref }, 60000)
+      const { plan, box, target } = await planClick(b, { ref: args.ref, x: args.x, y: args.y, pacing: args.pacing })
+      await b.request('click', { plan, ref: args.ref }, 60000)
 
 
       const where = box ? `[${args.ref}] 内落点 ${fmtBox({ ...box, x: target.x, y: target.y, w: 1, h: 1 })}` : `坐标 (${target.x},${target.y})`
@@ -566,9 +655,8 @@ export const TOOLS = [
       tab: { type: 'integer', description: '标签页 id' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
       const profile = resolveProfile(args.pacing)
       const rng = rngNow()
 
@@ -578,10 +666,10 @@ export const TOOLS = [
       // 在聚焦或清空前拒绝明显无法按时完成的长文本。
       if (total > 95000) throw new Error('这段文本过长，请分段输入')
       const clickPlan = args.ref != null
-        ? (await planClick(tabId, { ref: args.ref, pacing: args.pacing })).plan
+        ? (await planClick(b, { ref: args.ref, pacing: args.pacing })).plan
         : undefined
       await b.request('type', {
-        tabId, plan, ref: args.ref, clickPlan, clearFirst: !!args.clearFirst,
+        plan, ref: args.ref, clickPlan, clearFirst: !!args.clearFirst,
         enterDelay: args.thenEnter ? stepPause(profile, rng) : undefined,
       }, 120000)
       return {
@@ -598,11 +686,9 @@ export const TOOLS = [
       tab: { type: 'integer', description: '标签页 id' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
-
-      await b.request('key', { tabId, key: args.key }, 15000)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
+      await b.request('key', { key: args.key }, 15000)
       return { text: `已按 ${args.key}` }
     },
   }),
@@ -616,13 +702,12 @@ export const TOOLS = [
       tab: { type: 'integer', description: '标签页 id' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
       if (args.ref === undefined || args.ref === null) throw new Error('hover 需要 ref')
 
-      const { plan } = await planClick(tabId, { ref: args.ref, pacing: args.pacing })
-      await b.request('hover', { tabId, plan, ref: args.ref }, 30000)
+      const { plan } = await planClick(b, { ref: args.ref, pacing: args.pacing })
+      await b.request('hover', { plan, ref: args.ref }, 30000)
       return { text: `鼠标已停在 [${args.ref}] 上` }
     },
   }),
@@ -638,21 +723,20 @@ export const TOOLS = [
       tab: { type: 'integer', description: '标签页 id' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
       const profile = resolveProfile(args.pacing)
       const rng = rngNow()
 
 
       if (args.ref != null) {
-        await b.request('elementBox', { tabId, ref: args.ref }, 12000)
+        await b.request('elementBox', { ref: args.ref }, 12000)
         return { text: `已将 [${args.ref}] 滚入视口` }
       }
 
       let delta = 0
       if (args.to) {
-        const info = await b.request('read', { tabId, what: 'info' }, 15000)
+        const info = await b.request('read', { what: 'info' }, 15000)
         const cur = Number(info.scroll?.y || 0)
         const max = Number(info.scroll?.max || 0)
         delta = args.to === 'top' ? -cur : max - cur
@@ -663,7 +747,7 @@ export const TOOLS = [
       if (!delta) throw new Error('给 delta、to 或 ref 之一')
 
       const parts = scrollPlan(delta, profile, rng)
-      const r = await b.request('scroll', { tabId, parts }, 60000)
+      const r = await b.request('scroll', { parts }, 60000)
 
       return {
         text: `已派发 ${delta > 0 ? '+' : ''}${delta}px 滚轮事件（${parts.length} 段）\n实测页面位置 ${r.y} / 最大 ${r.max}`,
@@ -685,15 +769,13 @@ export const TOOLS = [
       tab: { type: 'integer', description: '标签页 id' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
+    async execute(args, exec) {
       const timed = args.ms != null
       if ([!!args.selector, !!args.urlContains, timed].filter(Boolean).length !== 1) throw new Error('请指定一种等待条件')
-      const tabId = timed ? undefined : await resolveTab(args.tab)
+      const b = timed ? captureBrowser() : await resolveTarget(args.tab, exec)
       const r = await b.request(
         'wait',
         {
-          tabId,
           selector: args.selector,
           gone: !!args.gone,
           urlContains: args.urlContains,
@@ -710,7 +792,7 @@ export const TOOLS = [
 
   defineTool({
     name: 'browser_screenshot',
-    description: '截当前视口（或某个元素）。图会直接给你看。默认 jpeg 缩放，控制体积。',
+    description: '截图绑定或指定标签页的视口（或某个元素）。图会直接给你看。默认 jpeg 缩放，控制体积。',
     parameters: {
       ref: { type: 'string', description: '当前快照里的完整元素 ref，只截该元素' },
       format: { type: 'string', enum: ['jpeg', 'png'], description: '默认 jpeg' },
@@ -734,13 +816,12 @@ export const TOOLS = [
         return blocks
       },
     },
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
 
       const r = await b.request(
         'screenshot',
-        { tabId, format: args.format || 'jpeg', ref: args.ref, maxWidth: args.maxWidth },
+        { format: args.format || 'jpeg', ref: args.ref, maxWidth: args.maxWidth },
         90000,
       )
       const buf = Buffer.from(r.dataBase64, 'base64')
@@ -781,10 +862,9 @@ export const TOOLS = [
       tab: { type: 'integer', description: '标签页 id' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
-      const r = await b.request('evaluate', { tabId, expression: args.expression }, 30000)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
+      const r = await b.request('evaluate', { expression: args.expression }, 30000)
       let out
       try {
         out = JSON.stringify(r.value, null, 2)
@@ -805,10 +885,9 @@ export const TOOLS = [
       tab: { type: 'integer', description: '标签页 id' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
-      const tabId = await resolveTab(args.tab)
-      const r = await b.request('stealth', { tabId }, 30000)
+    async execute(args, exec) {
+      const b = await resolveTarget(args.tab, exec)
+      const r = await b.request('stealth', {}, 30000)
       const m = r.metrics || {}
       const icon = { fail: '✗', warn: '!', info: '·', ok: '✓' }
       const lines = [
@@ -843,9 +922,9 @@ export const TOOLS = [
       all: { type: 'boolean', description: '放掉全部' },
     },
     output: textOutput,
-    async execute(args) {
-      const b = needBridge()
+    async execute(args, exec) {
       if (args.all) {
+        const b = captureBrowser()
         const s = await b.request('status', {}, 8000)
         const ids = s.authorized || []
         const results = await Promise.allSettled(ids.map((tabId) => b.request('detach', { tabId }, 8000)))
@@ -853,10 +932,10 @@ export const TOOLS = [
         if (failed.length) throw new Error(`这些标签页释放未确认：${failed.join(', ')}`)
         return { text: `已释放并撤销 ${ids.length} 个标签页的授权` }
       }
-      const tabId = await resolveTab(args.tab)
-      await b.request('detach', { tabId }, 8000)
+      const b = await resolveTarget(args.tab, exec)
+      await b.request('detach', {}, 8000)
 
-      return { text: `已释放标签页 ${tabId}` }
+      return { text: `已释放标签页 ${b.tabId}` }
     },
   }),
 ]
@@ -871,9 +950,10 @@ const BROWSER_ROUTING_SECTION = {
   name: 'plugin:dsh-human-browser:routing',
   order: 800,
   text: [
-    '用户要求打开网页、点击、输入、截图或操作已有浏览器会话时，优先使用可用的 dsh-human-browser browser_* 工具。首次操作或连接状态不明时用 browser_status 核对连接，再用 browser_tabs 确认目标标签页。',
+    '用户要求打开网页、点击、输入、截图或操作已有浏览器会话时，优先使用可用的 dsh-human-browser browser_* 工具。连接状态不明时用 browser_status 确认；操作已有网页时用 browser_tabs list 找到目标，再用 bind 绑定明确的 tab。',
     '网页未授权时请用户在扩展弹窗授权。插件断线或缺少所需能力时说明限制，等待用户决定。用户明确要求独立浏览器或同意替代方式时，才通过 shell 或其他浏览器自动化工具另开实例。',
-    'browser_tabs open 在现有 Chrome 窗口打开标签页。任务指定无痕等窗口类型时，只在确认窗口类型匹配后读取或操作网页。需要新建无痕窗口时，说明限制，请用户在 Chrome 中打开并允许扩展在无痕模式运行，等待用户确认后继续。',
+    '用 browser_tabs open 打开网页。window=new 创建普通新窗口，incognito 优先复用可用的无痕窗口、没有时创建，newIncognito 强制新建无痕窗口。无痕请求必须保持在已核验的无痕窗口；权限关闭时提示用户在 Chrome 扩展详情启用无痕模式。',
+    '开页后自动绑定本聊天。省略 tab 使用已绑定标签页，焦点切换不更改绑定；关闭、移走或重连使目标失效时，通过 browser_tabs list 的 all=true 明确选择并重新 bind。页面读取和操作仍按原有授权规则。',
     '只查询公开资料、无需操作浏览器时，可以直接使用 web_search 或 web_fetch。',
   ].join('\n'),
 }
@@ -899,7 +979,7 @@ export function apply(ctx) {
   lifecycle?.dispose()
   const owner = {
     bridge: null, booting: null, retry: null, dispose: null,
-    suspended: false, updater: null, nativeHostError: null,
+    suspended: false, updater: null, nativeHostError: null, targets: new Map(),
   }
   lifecycle = owner
   pluginCtx = ctx
@@ -1061,17 +1141,16 @@ async function handleUpdateRoute(updater, connection, req, res) {
       return send(200, updater.getStatus())
     }
     if (req.method === 'GET' && route === 'progress') return send(200, updater.getProgress())
-    if (req.method === 'POST' && ['install', 'dismiss', 'ignore'].includes(route) &&
-        !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) {
-      return send(415, { error: '更新操作需要 application/json 请求' })
-    }
-    if (req.method === 'POST' && route === 'install') {
-      if (cleanupInProgress) return send(409, { error: '正在清理浏览器宿主，请稍后重试' })
-      return send(200, updater.startInstall())
-    }
-    if (req.method === 'POST' && ['dismiss', 'ignore'].includes(route)) {
+    if (req.method === 'POST' && ['install', 'dismiss', 'ignore'].includes(route)) {
+      if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) {
+        return send(415, { error: '更新操作需要 application/json 请求' })
+      }
       const { body, error } = await readJsonBody(req)
       if (error) return send(error, { error: error === 413 ? '请求体太大' : '请求体必须是有效 JSON 对象' })
+      if (route === 'install') {
+        if (cleanupInProgress) return send(409, { error: '正在清理浏览器宿主，请稍后重试' })
+        return send(200, updater.startInstall({ updateOnly: body.updateOnly === true }))
+      }
       if (route === 'dismiss') return send(200, updater.dismiss())
       if (typeof body.version !== 'string' || !body.version.trim()) {
         return send(400, { error: 'version 必须是非空字符串' })
