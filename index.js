@@ -1034,7 +1034,7 @@ function readJsonBody(req) {
 }
 
 /**
- * 更新相关的四条路由。契约见 docs/update-api.md，前端（月月写的弹窗）按那份调用。
+ * 扩展更新路由。契约见 docs/update-api.md。
  * 返回的永远是 JSON，错误也带具体原因，不让前端去猜。
  */
 async function handleUpdateRoute(updater, connection, req, res) {
@@ -1058,11 +1058,10 @@ async function handleUpdateRoute(updater, connection, req, res) {
       return send(rejection, { error: rejection === 401 ? '请先登录 DSH，再检查扩展更新' : 'DSH 拒绝了请求来源' })
     }
     if (req.method === 'GET' && route === 'status') {
-      await updater.refreshReleaseInfo()
       return send(200, updater.getStatus())
     }
     if (req.method === 'GET' && route === 'progress') return send(200, updater.getProgress())
-    if (req.method === 'POST' && (route === 'install' || route === 'dismiss') &&
+    if (req.method === 'POST' && ['install', 'dismiss', 'ignore'].includes(route) &&
         !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) {
       return send(415, { error: '更新操作需要 application/json 请求' })
     }
@@ -1070,12 +1069,15 @@ async function handleUpdateRoute(updater, connection, req, res) {
       if (cleanupInProgress) return send(409, { error: '正在清理浏览器宿主，请稍后重试' })
       return send(200, updater.startInstall())
     }
-    if (req.method === 'POST' && route === 'dismiss') {
+    if (req.method === 'POST' && ['dismiss', 'ignore'].includes(route)) {
       const { body, error } = await readJsonBody(req)
       if (error) return send(error, { error: error === 413 ? '请求体太大' : '请求体必须是有效 JSON 对象' })
-      const version = body.version || url.searchParams.get('version') || null
-      if (version !== null && typeof version !== 'string') return send(400, { error: 'version 必须是字符串' })
-      return send(200, updater.dismiss(version))
+      if (route === 'dismiss') return send(200, updater.dismiss())
+      if (typeof body.version !== 'string' || !body.version.trim()) {
+        return send(400, { error: 'version 必须是非空字符串' })
+      }
+      const result = updater.ignoreUpdate(body.version)
+      return send(result.ok ? 200 : 409, result)
     }
     return send(404, { error: `没有这个路由：${req.method} ${route || '/'}` })
   } catch (e) {

@@ -62,9 +62,16 @@ window.__ModuleLoader__.load({
       #${dialogId} footer {
         display: flex;
         flex-wrap: wrap;
-        justify-content: flex-end;
+        align-items: center;
         gap: 8px;
         margin-top: 20px;
+      }
+      #${dialogId} .hb-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-inline-start: auto;
       }
       #${dialogId} button {
         min-height: 36px;
@@ -188,22 +195,26 @@ window.__ModuleLoader__.load({
         onClose()
       })
 
+      /** 构造动作按钮，自定义样式仅用于强调主动作。 */
+      function actionButton({ label, onClick }, className) {
+        const button = node('button', label, className)
+        button.type = 'button'
+        button.onclick = onClick
+        return button
+      }
+
       return {
         /** 就地替换弹窗内容，并把焦点移到新状态的标题。 */
-        show(title, children, primary, close, closeLabel = '取消') {
+        show(title, children, primary, close, { closeLabel = '取消', leadingAction } = {}) {
           onClose = close
           heading.textContent = title
           content.replaceChildren(...children)
-          const secondary = node('button', closeLabel)
-          secondary.type = 'button'
-          secondary.onclick = close
-          footer.replaceChildren(secondary)
-          if (primary) {
-            const button = node('button', primary.label, 'hb-primary')
-            button.type = 'button'
-            button.onclick = primary.onClick
-            footer.append(button)
-          }
+          const actions = node('div', undefined, 'hb-actions')
+          actions.append(actionButton({ label: closeLabel, onClick: close }))
+          if (primary) actions.append(actionButton(primary, 'hb-primary'))
+          footer.replaceChildren()
+          if (leadingAction) footer.append(actionButton(leadingAction))
+          footer.append(actions)
           if (!dialog.open) {
             document.body.append(dialog)
             dialog.showModal()
@@ -239,23 +250,32 @@ window.__ModuleLoader__.load({
           installRun = undefined
         }
 
-        /** 立即恢复主界面操作，稍后由宿主确认该版本是否已成功静默。 */
-        async function dismiss() {
+        /** 立即关闭弹窗，宿主保存失败时显示操作相关的错误。 */
+        async function closePrompt(action, body, failureMessage) {
           stopPolling()
           view.close()
-          if (!status) return
           try {
-            await request('dismiss', lifetime.signal, { version: status.targetVersion })
+            await request(action, lifetime.signal, body)
           } catch (error) {
             if (lifetime.signal.aborted) return
             notice?.remove()
             clearTimeout(noticeTimer)
-            notice = node('div', `未能记住本次取消\n${error.message}`)
+            notice = node('div', `${failureMessage}\n${error.message}`)
             notice.id = dialogId + '-notice'
             notice.setAttribute('role', 'alert')
             document.body.append(notice)
             noticeTimer = setTimeout(() => notice.remove(), 8000)
           }
+        }
+
+        /** 取消当前 DSH 启动的提示，Esc 也走此路径。 */
+        function dismiss() {
+          return closePrompt('dismiss', {}, '未能关闭本次启动的扩展提示')
+        }
+
+        /** 忽略弹窗中的适配版本，重启后仍使用宿主保存的选择。 */
+        function ignoreUpdate() {
+          return closePrompt('ignore', { version: status.targetVersion }, '未能忽略本次扩展更新')
         }
 
         /** 只有首次安装需要保留完成态，让用户能选中路径并按步骤手动加载。 */
@@ -268,7 +288,7 @@ window.__ModuleLoader__.load({
           view.show('扩展已解压', [
             node('p', '请在 Chrome 地址栏打开 chrome://extensions，开启「开发者模式」，选择「加载已解压的扩展程序」，然后选中下方目录。'),
             node('code', progress.installedPath || '宿主未返回解压路径', 'hb-path'),
-          ], null, () => view.close(), '关闭')
+          ], null, () => view.close(), { closeLabel: '关闭' })
         }
 
         /** 安装启动后按秒读进度。上一轮返回后才排下一轮，避免并发请求覆盖状态。 */
@@ -350,7 +370,7 @@ window.__ModuleLoader__.load({
             if (typeof current.installed !== 'boolean' || typeof current.targetVersion !== 'string' || !current.targetVersion) {
               throw new Error('宿主缺少扩展版本状态')
             }
-            if (Date.now() < Date.parse(current.dismissedUntil)) return
+            if (current.dismissedForSession || current.ignoredUpdate) return
             if (current.installed && !current.needsUpdate && !current.pendingReloadOnly) return
             status = current
             if (!status.installed) {
@@ -368,12 +388,12 @@ window.__ModuleLoader__.load({
               return
             }
 
-            const title = `推荐扩展版本 ${status.targetVersion}`
-            const children = [node('p', `当前：${status.userVersion ?? '未知'} → 推荐：${status.targetVersion}`, 'hb-secondary')]
+            const title = `扩展可更新至 ${status.targetVersion}`
+            const children = [node('p', `当前 ${status.userVersion ?? '未知'}，插件适配 ${status.targetVersion}`, 'hb-secondary')]
             const profiles = status.profiles ?? []
             const outdated = profiles.filter((profile) => isOlder(profile.version, status.targetVersion)).length
             if (profiles.length > 1 && outdated > 0) {
-              children.push(node('p', `有 ${outdated} 个配置的扩展低于推荐版本。`, 'hb-secondary'))
+              children.push(node('p', `有 ${outdated} 个配置的扩展低于插件适配版本。`, 'hb-secondary'))
             }
             if (status.releaseNotes) {
               const notes = node('section')
@@ -383,7 +403,9 @@ window.__ModuleLoader__.load({
               notes.append(node('p', '更新内容'), body)
               children.push(notes)
             }
-            view.show(title, children, { label: '更新', onClick: install }, dismiss)
+            view.show(title, children, { label: '更新', onClick: install }, dismiss, {
+              leadingAction: { label: '忽略本次更新', onClick: ignoreUpdate },
+            })
           } catch (error) {
             if (lifetime.signal.aborted) return
             view.show('无法检查浏览器扩展', [node('p', error.message, 'hb-error')],

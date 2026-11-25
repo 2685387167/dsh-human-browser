@@ -75,10 +75,10 @@ dsh plugin --profile desktop add github:2685387167/dsh-human-browser
 
 装好后重启 DSH。插件会在加载时自动注册 native messaging host（写 HKCU 注册表，不需要管理员）。
 
-如需固定安装 DSH 插件 0.1.4，使用下面的命令。配套的 Chrome 扩展资产见 [Chrome 扩展 0.1.4](https://github.com/2685387167/dsh-human-browser/releases/tag/extension-v0.1.4)。
+如需固定安装 DSH 插件 0.1.5，使用下面的命令。配套的 Chrome 扩展资产见 [Chrome 扩展 0.1.4](https://github.com/2685387167/dsh-human-browser/releases/tag/extension-v0.1.4)。
 
 ```powershell
-dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.1.4'
+dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.1.5'
 ```
 
 从旧版升级后，重启 DSH 会同步更新本机 native host。若 `browser_status` 显示宿主注册失败，可以在插件目录运行 `node scripts/install.mjs --check` 检查注册，或运行 `node scripts/install.mjs` 手动修复。
@@ -92,7 +92,9 @@ dsh plugin --profile desktop add 'github:2685387167/dsh-human-browser#plugin-v0.
 
 扩展的每个版本都发布在 [Releases](https://github.com/2685387167/dsh-human-browser/releases) 上，旧版本保留。想用特定版本可以自己下载解压再用 `chrome://extensions` 加载。
 
-DSH 插件版本和 Chrome 扩展版本独立维护。插件读取线上 [扩展推荐](extension-version.json)，只接受与当前通信协议兼容的推荐；离线时使用本地已有的推荐。GitHub 的 Latest 标记只用于浏览发布页面。
+DSH 插件版本和 Chrome 扩展版本独立维护。每个 DSH 插件通过随包 [适配配置](extension-version.json) 指定一个扩展版本。检查时只有查到本机扩展低于该版本才提示更新，点「更新」后下载配置指定的 ZIP。已达到适配版本或用了更高版本时，可继续使用当前扩展。
+
+更新弹窗中的「取消」只关闭本次 DSH 启动的提示，重启后可再次提示。左下角的「忽略本次更新」会记住本次适配版本，之后按新适配版本重新判断。
 
 ### 3. 授权
 
